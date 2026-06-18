@@ -112,6 +112,7 @@ import {
   agentConfigurationDoc as openclawGatewayAgentConfigurationDoc,
   models as openclawGatewayModels,
 } from "@paperclipai/adapter-openclaw-gateway";
+import { ironclawHttpAdapter } from "./ironclaw-http/index.js";
 import { listCodexModels, refreshCodexModels } from "./codex-models.js";
 import { listCursorModels } from "./cursor-models.js";
 import {
@@ -542,6 +543,7 @@ function registerBuiltInAdapters() {
     geminiLocalAdapter,
     grokLocalAdapter,
     openclawGatewayAdapter,
+    ironclawHttpAdapter,
     hermesLocalAdapter,
     processAdapter,
     httpAdapter,

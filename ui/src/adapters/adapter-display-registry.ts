@@ -116,6 +116,11 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     disabledLabel: "Invite external agents from the add-agent modal",
     hideFromVisualSelection: true,
   },
+  ironclaw_http: {
+    label: "Ironclaw HTTP",
+    description: "Ironclaw gateway via HTTP API",
+    icon: Bot,
+  },
   process: {
     label: "Process",
     description: "Internal process adapter",
