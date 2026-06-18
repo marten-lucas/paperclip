@@ -15,8 +15,9 @@ function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentT
 function resolveModelsUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!trimmed) return "";
-  if (trimmed.endsWith("/api/webchat/v2/llm/list-models")) return trimmed;
-  return `${trimmed.replace(/\/$/, "")}/api/webchat/v2/llm/list-models`;
+  // Ironclaw exposes OpenAI-compatible GET /v1/models
+  if (trimmed.endsWith("/v1/models")) return trimmed;
+  return `${trimmed.replace(/\/$/, "")}/v1/models`;
 }
 
 export async function testEnvironment(
@@ -74,13 +75,12 @@ export async function testEnvironment(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     try {
+      // Ironclaw exposes the OpenAI-compatible GET /v1/models endpoint
       const response = await fetch(endpoint, {
-        method: "POST",
+        method: "GET",
         headers: {
-          "content-type": "application/json",
           authorization: `Bearer ${authToken}`,
         },
-        body: "{}",
         signal: controller.signal,
       });
 
@@ -91,9 +91,13 @@ export async function testEnvironment(
           message: `Model discovery failed with HTTP ${response.status}`,
         });
       } else {
-        const payload = (await response.json().catch(() => ({}))) as { models?: unknown };
-        const models = Array.isArray(payload.models)
-          ? payload.models.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        // OpenAI-compatible format: { data: [{ id, object, ... }], object: "list" }
+        const payload = (await response.json().catch(() => ({}))) as { data?: unknown };
+        const models = Array.isArray(payload.data)
+          ? payload.data
+              .filter((item): item is { id: string } => typeof item === "object" && item !== null && typeof (item as { id?: unknown }).id === "string")
+              .map((item) => (item as { id: string }).id.trim())
+              .filter((id) => id.length > 0)
           : [];
 
         refreshIronclawHttpModels(models);
