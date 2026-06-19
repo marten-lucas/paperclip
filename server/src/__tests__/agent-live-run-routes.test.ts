@@ -582,6 +582,14 @@ describe("agent live run routes", () => {
         triggeredBy: "board",
         actorId: "local-board",
         forceFreshSession: true,
+        manualTaskMarkdown: [
+          "Manual wake task context:",
+          "- Reason: \"issue_assigned\"",
+          "- Task key: \"issue-1\"",
+          "- Issue: \"issue-1\"",
+          "",
+          "Use this manual wake context as the current assignment.",
+        ].join("\n"),
       },
     });
   });
@@ -603,6 +611,12 @@ describe("agent live run routes", () => {
       contextSnapshot: {
         triggeredBy: "board",
         actorId: "local-board",
+        manualTaskMarkdown: [
+          "Manual wake task context:",
+          "- Trigger: on_demand/manual",
+          "- Triggered by: \"board:local-board\"",
+          "- Objective: Continue the active assignment and report status/progress.",
+        ].join("\n"),
       },
     });
   });

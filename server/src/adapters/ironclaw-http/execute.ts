@@ -1,4 +1,5 @@
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
+import { createHash } from "node:crypto";
 import { asNumber, asString, parseObject } from "../utils.js";
 
 type IronclawUsage = {
@@ -15,7 +16,47 @@ function resolveBaseUrl(rawUrl: string): string {
   return `${trimmed.replace(/\/$/, "")}/api/v1/responses`;
 }
 
+function toUuidHex(value: string): string {
+  const trimmed = value.trim();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return trimmed.replace(/-/g, "").toLowerCase();
+  }
+
+  return createHash("sha256").update(trimmed).digest("hex").slice(0, 32);
+}
+
+function buildSeededPreviousResponseId(agentId: string): string {
+  const threadHex = toUuidHex(`paperclip-agent-thread:${agentId}`);
+  const responseHex = createHash("sha256")
+    .update(`paperclip-agent-seed-response:${agentId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `resp_${responseHex}${threadHex}`;
+}
+
+function buildConversationLabel(agentLabel: string): string {
+  if (/\bceo\b/i.test(agentLabel)) return "CEO heartbeat";
+  return `${agentLabel} heartbeat`;
+}
+
 function extractMessage(ctx: AdapterExecutionContext): string {
+  const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
+  const taskMarkdown = asString(ctx.context.paperclipTaskMarkdown, "").trim();
+  if (taskMarkdown.length > 0) {
+    return `${agentLabel} heartbeat task:\n\n${taskMarkdown}`;
+  }
+
+  const manualTaskMarkdown = asString(ctx.context.manualTaskMarkdown, "").trim();
+  if (manualTaskMarkdown.length > 0) {
+    return `${agentLabel} heartbeat task:\n\n${manualTaskMarkdown}`;
+  }
+
+  const wakePayload = parseObject(ctx.context.paperclipWake);
+  const wakeSummary = asString(wakePayload.summary, "").trim();
+  if (wakeSummary.length > 0) {
+    return wakeSummary;
+  }
+
   if (typeof ctx.context.input === "string" && ctx.context.input.trim().length > 0) {
     return ctx.context.input;
   }
@@ -32,7 +73,7 @@ function extractMessage(ctx: AdapterExecutionContext): string {
     }
   }
 
-  return "Execute the assigned task.";
+  return `${agentLabel} heartbeat task:\n\nExecute the assigned task.`;
 }
 
 function extractOutputText(output: unknown): string {
@@ -96,8 +137,34 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const input = extractMessage(ctx);
+  const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
+  const wakeSource = asString(ctx.context.wakeSource, "").trim();
+  const wakeReason = asString(ctx.context.wakeReason, "").trim();
+  const wakeTriggerDetail = asString(ctx.context.wakeTriggerDetail, "").trim();
+  const taskKey = asString(ctx.context.taskKey, "").trim() || ctx.runtime.taskKey || "";
+  const issueId = asString(ctx.context.issueId, "").trim();
   const body: Record<string, unknown> = {
     input,
+    // Ironclaw extension field. Used to persist Paperclip-side invocation
+    // identity in gateway conversation metadata.
+    x_context: {
+      paperclip: {
+        source: "paperclip_heartbeat",
+        runId: ctx.runId,
+        companyId: ctx.agent.companyId,
+        agentId: ctx.agent.id,
+        agentName: agentLabel,
+        wakeSource: wakeSource || null,
+        wakeReason: wakeReason || null,
+        wakeTriggerDetail: wakeTriggerDetail || null,
+        taskKey: taskKey || null,
+        issueId: issueId || null,
+      },
+      conversation: {
+        label: buildConversationLabel(agentLabel),
+        kind: "paperclip_heartbeat",
+      },
+    },
   };
   // Ironclaw currently supports the implicit default model only.
   // Send "model" only when the caller explicitly requests "default".
@@ -107,9 +174,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ctx.runtime.sessionParams && typeof ctx.runtime.sessionParams === "object"
       ? asString((ctx.runtime.sessionParams as Record<string, unknown>).responseId, "")
       : "";
-  if (previousResponseId) {
-    body.previous_response_id = previousResponseId;
-  }
+  const seededPreviousResponseId = buildSeededPreviousResponseId(ctx.agent.id);
+  const effectivePreviousResponseId = previousResponseId || seededPreviousResponseId;
+  body.previous_response_id = effectivePreviousResponseId;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
@@ -125,6 +192,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         source: {
           url: asString(env.IRONCLAW_BASE_URL, "").trim().length > 0 ? "env.IRONCLAW_BASE_URL" : "adapterConfig.url",
           token: asString(env.IRONCLAW_API_KEY, "").trim().length > 0 ? "env.IRONCLAW_API_KEY" : "adapterConfig.authToken",
+        },
+        conversation: {
+          strategy: previousResponseId ? "session_previous_response_id" : "deterministic_agent_seed",
+          previousResponseId: effectivePreviousResponseId,
         },
       },
       prompt: input,
@@ -168,7 +239,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode: 0,
       signal: null,
       timedOut: false,
-      model: asString(payload.model, requestModel || null),
+      model: asString(payload.model, requestModel || "") || null,
       usage: toUsage(payload.usage),
       resultJson: payload,
       summary: `Ironclaw HTTP ${requestModel || "default model"}`,

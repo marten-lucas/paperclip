@@ -1,5 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { execute } from "./execute.js";
+
+function seededPreviousResponseId(agentId: string): string {
+  const threadHex = createHash("sha256")
+    .update(`paperclip-agent-thread:${agentId}`)
+    .digest("hex")
+    .slice(0, 32);
+  const responseHex = createHash("sha256")
+    .update(`paperclip-agent-seed-response:${agentId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `resp_${responseHex}${threadHex}`;
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,13 +86,28 @@ describe("ironclaw_http execute", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestUrl = String(calls[0]?.[0]);
+    const requestInit = (calls[0]?.[1] ?? {}) as RequestInit;
     expect(requestUrl).toBe("http://127.0.0.1:3000/api/v1/responses");
     expect(requestInit.method).toBe("POST");
 
     const requestBody = JSON.parse(String(requestInit.body));
     expect(requestBody.model).toBeUndefined();
     expect(requestBody.input).toBe("say hi");
+    expect(requestBody.previous_response_id).toBe(seededPreviousResponseId("agent-2"));
+    expect(requestBody.x_context).toMatchObject({
+      paperclip: {
+        source: "paperclip_heartbeat",
+        runId: "run-2",
+        agentId: "agent-2",
+        agentName: "Agent",
+      },
+      conversation: {
+        label: "Agent heartbeat",
+        kind: "paperclip_heartbeat",
+      },
+    });
 
     expect(result.exitCode).toBe(0);
     expect(result.sessionParams).toEqual({ responseId: "resp_123" });
@@ -126,10 +154,195 @@ describe("ironclaw_http execute", () => {
       onLog: async () => {},
     });
 
-    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestInit = (calls[0]?.[1] ?? {}) as RequestInit;
     const requestBody = JSON.parse(String(requestInit.body));
     expect(requestBody.model).toBe("default");
+    expect(requestBody.previous_response_id).toBe(seededPreviousResponseId("agent-3"));
     expect(result.exitCode).toBe(0);
     expect(result.sessionParams).toEqual({ responseId: "resp_124" });
+  });
+
+  it("uses runtime session responseId over deterministic seed when present", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_200",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-4",
+      agent: {
+        id: "agent-4",
+        companyId: "company-1",
+        name: "Agent",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: { responseId: "resp_existing" },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        input: "continue",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestInit = (calls[0]?.[1] ?? {}) as RequestInit;
+    const requestBody = JSON.parse(String(requestInit.body));
+    expect(requestBody.previous_response_id).toBe("resp_existing");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("prefers paperclipTaskMarkdown over fallback input and prefixes agent label", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_300",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-5",
+      agent: {
+        id: "f9dcf478-88ac-496e-96df-79a3c4927057",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        input: "",
+        paperclipTaskMarkdown: "Paperclip task context:\n- Issue: \"AHOA-1\"\n- Title: \"Do work\"",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.input).toContain("CEO heartbeat task:");
+    expect(requestBody.input).toContain("Paperclip task context:");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("uses agent-specific fallback when no contextual input is available", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_301",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-6",
+      agent: {
+        id: "f9dcf478-88ac-496e-96df-79a3c4927057",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {},
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.input).toBe("CEO heartbeat task:\n\nExecute the assigned task.");
+    expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
+    expect(requestBody.x_context?.paperclip?.wakeSource).toBeNull();
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("uses manualTaskMarkdown when paperclipTaskMarkdown is unavailable", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_302",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-7",
+      agent: {
+        id: "agent-7",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        manualTaskMarkdown: "Manual wake task context:\n- Reason: \"manual\"",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.input).toContain("CEO heartbeat task:\n\nManual wake task context:");
+    expect(result.exitCode).toBe(0);
   });
 });

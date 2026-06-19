@@ -3253,6 +3253,48 @@ export function agentRoutes(
   //    SkippedWakeupResponse; the legacy endpoint stays on the simpler
   //    { status: "skipped" } shape for backward compat.
   type HeartbeatSource = "timer" | "assignment" | "on_demand" | "automation";
+  const buildManualTaskMarkdown = (input: {
+    reason?: string | null;
+    payload?: Record<string, unknown> | null;
+    actorType: string;
+    actorId: string | null | undefined;
+  }) => {
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    const payload = input.payload ?? null;
+    const asText = (value: unknown) => typeof value === "string" ? value.trim() : "";
+    const taskMarkdown = asText(payload?.paperclipTaskMarkdown) || asText(payload?.taskMarkdown);
+    if (taskMarkdown) return taskMarkdown;
+
+    const taskKey = asText(payload?.taskKey) || asText(payload?.taskId);
+    const issueId = asText(payload?.issueId);
+    const title = asText(payload?.title) || asText(payload?.taskTitle);
+    const summary = asText(payload?.summary);
+    const description = asText(payload?.description) || asText(payload?.taskDescription);
+
+    const hasExplicitTaskContext = Boolean(taskKey || issueId || title || summary || description || reason);
+    if (!hasExplicitTaskContext) {
+      const actorLabel = input.actorId ? `${input.actorType}:${input.actorId}` : input.actorType;
+      return [
+        "Manual wake task context:",
+        "- Trigger: on_demand/manual",
+        `- Triggered by: ${JSON.stringify(actorLabel)}`,
+        "- Objective: Continue the active assignment and report status/progress.",
+      ].join("\n");
+    }
+
+    const lines = ["Manual wake task context:"];
+    if (reason) lines.push(`- Reason: ${JSON.stringify(reason)}`);
+    if (taskKey) lines.push(`- Task key: ${JSON.stringify(taskKey)}`);
+    if (issueId) lines.push(`- Issue: ${JSON.stringify(issueId)}`);
+    if (title) lines.push(`- Title: ${JSON.stringify(title)}`);
+    if (summary) lines.push(`- Summary: ${JSON.stringify(summary)}`);
+    if (description) {
+      lines.push("", "Task description:", "```text", description, "```");
+    }
+    lines.push("", "Use this manual wake context as the current assignment.");
+    return lines.join("\n");
+  };
+
   type WakeupRouteOpts = {
     source: HeartbeatSource | undefined;
     skippedResponse: (agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) => unknown | Promise<unknown>;
@@ -3297,6 +3339,15 @@ export function agentRoutes(
         triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
         forceFreshSession: req.body.forceFreshSession === true,
+        manualTaskMarkdown: buildManualTaskMarkdown({
+          reason: typeof req.body.reason === "string" ? req.body.reason : null,
+          payload:
+            req.body.payload && typeof req.body.payload === "object" && !Array.isArray(req.body.payload)
+              ? req.body.payload as Record<string, unknown>
+              : null,
+          actorType: req.actor.type,
+          actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+        }),
       },
     });
 
@@ -3369,6 +3420,14 @@ export function agentRoutes(
     const contextSnapshot: Record<string, unknown> = {
       triggeredBy: req.actor.type,
       actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+      manualTaskMarkdown: buildManualTaskMarkdown({
+        reason: typeof body.reason === "string" ? body.reason : null,
+        payload: body.payload && typeof body.payload === "object" && !Array.isArray(body.payload)
+          ? body.payload as Record<string, unknown>
+          : null,
+        actorType: req.actor.type,
+        actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+      }),
     };
     if (body.forceFreshSession === true) {
       contextSnapshot.forceFreshSession = true;
