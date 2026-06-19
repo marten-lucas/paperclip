@@ -35,6 +35,7 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   documentRevisions,
+  goals,
   issueDocuments,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -2774,6 +2775,22 @@ export function buildPaperclipTaskMarkdown(input: {
     status?: string | null;
   } | null;
   acceptedPlanContinuation?: boolean;
+  strategicContext?: {
+    company?: {
+      id: string;
+      name: string;
+    } | null;
+    project?: {
+      id: string;
+      title: string;
+      description?: string | null;
+    } | null;
+    goal?: {
+      id: string;
+      title: string;
+      description?: string | null;
+    } | null;
+  } | null;
 }) {
   const quoteTaskScalar = (value: string) => JSON.stringify(value);
   const fenceTaskText = (value: string) => {
@@ -2828,6 +2845,32 @@ export function buildPaperclipTaskMarkdown(input: {
     const description = issue.description?.trim();
     if (description) {
       lines.push("", "Issue description:", fenceTaskText(description));
+    }
+  }
+  const strategicContext = input.strategicContext ?? null;
+  if (strategicContext) {
+    const companyName = strategicContext.company?.name?.trim() ?? "";
+    const projectTitle = strategicContext.project?.title?.trim() ?? "";
+    const goalTitle = strategicContext.goal?.title?.trim() ?? "";
+    const projectDescription = strategicContext.project?.description?.trim() ?? "";
+    const goalDescription = strategicContext.goal?.description?.trim() ?? "";
+    if (companyName || projectTitle || goalTitle || projectDescription || goalDescription) {
+      lines.push("", "Strategic context:");
+      if (companyName) {
+        lines.push(`- Company: ${quoteTaskScalar(companyName)}`);
+      }
+      if (projectTitle) {
+        lines.push(`- Project: ${quoteTaskScalar(projectTitle)}`);
+      }
+      if (goalTitle) {
+        lines.push(`- Goal: ${quoteTaskScalar(goalTitle)}`);
+      }
+      if (projectDescription) {
+        lines.push("", "Project description:", fenceTaskText(projectDescription));
+      }
+      if (goalDescription) {
+        lines.push("", "Goal description:", fenceTaskText(goalDescription));
+      }
     }
   }
   if (wakeComment?.body.trim()) {
@@ -3257,6 +3300,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         status: issues.status,
         workMode: issues.workMode,
         priority: issues.priority,
+        goalId: issues.goalId,
         projectId: issues.projectId,
         projectWorkspaceId: issues.projectWorkspaceId,
         executionWorkspaceId: issues.executionWorkspaceId,
@@ -3272,6 +3316,50 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
+  }
+
+  async function getIssueStrategicContext(
+    companyId: string,
+    issueContext: Awaited<ReturnType<typeof getIssueExecutionContext>>,
+  ) {
+    if (!issueContext) return null;
+
+    const [companyRow, projectRow, goalRow] = await Promise.all([
+      db
+        .select({ id: companies.id, name: companies.name })
+        .from(companies)
+        .where(eq(companies.id, companyId))
+        .then((rows) => rows[0] ?? null),
+      issueContext.projectId
+        ? db
+            .select({ id: projects.id, title: projects.name, description: projects.description })
+            .from(projects)
+            .where(and(eq(projects.id, issueContext.projectId), eq(projects.companyId, companyId)))
+            .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
+      issueContext.goalId
+        ? db
+            .select({ id: goals.id, title: goals.title, description: goals.description })
+            .from(goals)
+            .where(and(eq(goals.id, issueContext.goalId), eq(goals.companyId, companyId)))
+            .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
+    ]);
+
+    const hasValues = Boolean(
+      companyRow?.name ||
+      projectRow?.title ||
+      projectRow?.description ||
+      goalRow?.title ||
+      goalRow?.description,
+    );
+    if (!hasValues) return null;
+
+    return {
+      company: companyRow,
+      project: projectRow,
+      goal: goalRow,
+    };
   }
 
   async function getRoutineEnvForExecutionIssue(
@@ -8072,6 +8160,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context[PAPERCLIP_WAKE_PAYLOAD_KEY];
     }
+    const strategicContext = issueContext
+      ? await getIssueStrategicContext(agent.companyId, issueContext)
+      : null;
     const taskMarkdown = buildPaperclipTaskMarkdown({
       issue: issueRef
         ? {
@@ -8090,6 +8181,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       acceptedPlanContinuation:
         readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation"
         && Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0,
+      strategicContext,
     });
     if (issueRef) {
       context.paperclipIssue = {
@@ -8111,6 +8203,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       context.paperclipTaskMarkdown = taskMarkdown;
     } else {
       delete context.paperclipTaskMarkdown;
+    }
+    if (strategicContext) {
+      context.paperclipStrategicContext = strategicContext;
+    } else {
+      delete context.paperclipStrategicContext;
     }
     const existingExecutionWorkspace =
       issueRef?.executionWorkspaceId ? await executionWorkspacesSvc.getById(issueRef.executionWorkspaceId) : null;

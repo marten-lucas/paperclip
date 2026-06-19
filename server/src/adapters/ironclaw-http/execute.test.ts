@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { execute } from "./execute.js";
 
 function seededPreviousResponseId(agentId: string): string {
@@ -391,5 +394,86 @@ describe("ironclaw_http execute", () => {
     expect(requestBody.previous_response_id).toBeUndefined();
     expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
     expect(result.exitCode).toBe(0);
+  });
+
+  it("injects managed instructions and selected runtime skills into the outbound prompt", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ironclaw-execute-test-"));
+    const instructionsPath = path.join(tempDir, "AGENTS.md");
+    const skillDir = path.join(tempDir, "paperclip-converting-plans-to-tasks");
+    const skillPath = path.join(skillDir, "SKILL.md");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(instructionsPath, "# Agent instructions\nAlways decompose approved plans.", "utf8");
+    await fs.writeFile(skillPath, "# Plan to tasks\nUse blockedByIssueIds for real blockers.", "utf8");
+
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_500",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await execute({
+        runId: "run-9",
+        agent: {
+          id: "agent-9",
+          companyId: "company-1",
+          name: "CEO",
+          adapterType: "ironclaw_http",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          env: {
+            IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+            IRONCLAW_API_KEY: "token-123",
+          },
+          instructionsFilePath: instructionsPath,
+          paperclipRuntimeSkills: [
+            {
+              key: "paperclip-converting-plans-to-tasks",
+              runtimeName: "paperclip-converting-plans-to-tasks",
+              source: skillDir,
+              sourceStatus: "available",
+              required: false,
+            },
+          ],
+          paperclipSkillSync: {
+            desiredSkills: ["paperclip-converting-plans-to-tasks"],
+          },
+        },
+        context: {
+          paperclipTaskMarkdown: "Paperclip task context:\n- Issue: \"AHOA-1\"",
+          paperclipStrategicContext: {
+            company: { id: "company-1", name: "AHOA" },
+          },
+        },
+        onLog: async () => {},
+      });
+
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+      const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+      expect(requestBody.input).toContain("Managed agent instructions");
+      expect(requestBody.input).toContain("Always decompose approved plans.");
+      expect(requestBody.input).toContain("Paperclip runtime skills");
+      expect(requestBody.input).toContain("Skill: paperclip-converting-plans-to-tasks");
+      expect(requestBody.input).toContain("Use blockedByIssueIds for real blockers.");
+      expect(requestBody.x_context.paperclip.runtimeSkills).toEqual(["paperclip-converting-plans-to-tasks"]);
+      expect(requestBody.x_context.paperclip.managedInstructionsAttached).toBe(true);
+      expect(requestBody.x_context.paperclip.strategicContext).toMatchObject({
+        company: { id: "company-1", name: "AHOA" },
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

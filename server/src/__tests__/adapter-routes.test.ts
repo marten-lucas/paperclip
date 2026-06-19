@@ -214,6 +214,11 @@ describe("adapter routes", () => {
     expect(codexLocal).toBeDefined();
     expect(codexLocal.capabilities.supportsSkills).toBe(true);
 
+    // ironclaw_http now exposes Paperclip runtime skill snapshots and sync state
+    const ironclawHttp = res.body.find((a: any) => a.type === "ironclaw_http");
+    expect(ironclawHttp).toBeDefined();
+    expect(ironclawHttp.capabilities.supportsSkills).toBe(true);
+
     // acpx_local exposes runtime-aware skill snapshots for Claude/Codex/custom ACP agents
     const acpxLocal = res.body.find((a: any) => a.type === "acpx_local");
     expect(acpxLocal).toBeDefined();

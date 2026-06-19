@@ -1,12 +1,26 @@
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { resolvePaperclipDesiredSkillNames } from "@paperclipai/adapter-utils/server-utils";
 import { asNumber, asString, parseObject } from "../utils.js";
+const MAX_INSTRUCTIONS_CHARS = 12_000;
+const MAX_SKILLS_IN_PROMPT = 6;
+const MAX_SKILL_CHARS = 4_000;
 
 type IronclawUsage = {
   input_tokens?: number;
   output_tokens?: number;
   inputTokens?: number;
   outputTokens?: number;
+};
+
+type RuntimeSkillEntry = {
+  key: string;
+  runtimeName: string;
+  source: string;
+  sourceStatus: "available" | "missing";
+  required: boolean;
 };
 
 function resolveBaseUrl(rawUrl: string): string {
@@ -37,6 +51,124 @@ function buildSeededPreviousResponseId(agentId: string): string {
 function buildConversationLabel(agentLabel: string): string {
   if (/\bceo\b/i.test(agentLabel)) return "CEO heartbeat";
   return `${agentLabel} heartbeat`;
+}
+
+function truncateChars(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n...[truncated by Paperclip]`;
+}
+
+function parseRuntimeSkillEntries(config: Record<string, unknown>): RuntimeSkillEntry[] {
+  const raw = Array.isArray(config.paperclipRuntimeSkills) ? config.paperclipRuntimeSkills : [];
+  const out: RuntimeSkillEntry[] = [];
+  for (const entry of raw) {
+    const parsed = parseObject(entry);
+    const key = asString(parsed.key, "").trim();
+    const runtimeName = asString(parsed.runtimeName, key).trim();
+    const source = asString(parsed.source, "").trim();
+    if (!key || !runtimeName || !source) continue;
+    out.push({
+      key,
+      runtimeName,
+      source,
+      sourceStatus: parsed.sourceStatus === "missing" ? "missing" : "available",
+      required: parsed.required === true,
+    });
+  }
+  return out;
+}
+
+async function readManagedInstructions(
+  config: Record<string, unknown>,
+  onLog: AdapterExecutionContext["onLog"],
+): Promise<{ content: string | null; sourcePath: string | null }> {
+  const sourcePath = asString(config.instructionsFilePath, "").trim();
+  if (!sourcePath) return { content: null, sourcePath: null };
+
+  try {
+    const text = (await fs.readFile(sourcePath, "utf8")).trim();
+    if (!text) return { content: null, sourcePath };
+    return {
+      content: truncateChars(text, MAX_INSTRUCTIONS_CHARS),
+      sourcePath,
+    };
+  } catch (error) {
+    await onLog(
+      "stderr",
+      `[paperclip] Failed to read managed instructions at ${sourcePath}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return { content: null, sourcePath };
+  }
+}
+
+async function readSelectedSkillMarkdown(
+  config: Record<string, unknown>,
+  onLog: AdapterExecutionContext["onLog"],
+): Promise<{ selectedKeys: string[]; sections: string[] }> {
+  const entries = parseRuntimeSkillEntries(config);
+  if (entries.length === 0) return { selectedKeys: [], sections: [] };
+
+  const desired = new Set(resolvePaperclipDesiredSkillNames(config, entries));
+  const selected = entries
+    .filter((entry) => desired.has(entry.key) && entry.sourceStatus !== "missing")
+    .slice(0, MAX_SKILLS_IN_PROMPT);
+  if (selected.length === 0) return { selectedKeys: [], sections: [] };
+
+  const sections: string[] = [];
+  for (const entry of selected) {
+    const markdownPath = path.join(entry.source, "SKILL.md");
+    try {
+      const markdown = (await fs.readFile(markdownPath, "utf8")).trim();
+      if (!markdown) continue;
+      sections.push([
+        `### Skill: ${entry.key}`,
+        "",
+        truncateChars(markdown, MAX_SKILL_CHARS),
+      ].join("\n"));
+    } catch (error) {
+      await onLog(
+        "stderr",
+        `[paperclip] Failed to read runtime skill ${entry.key} at ${markdownPath}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+
+  return {
+    selectedKeys: selected.map((entry) => entry.key),
+    sections,
+  };
+}
+
+async function buildPromptInput(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+): Promise<{ prompt: string; attachedSkills: string[]; hasManagedInstructions: boolean }> {
+  const basePrompt = extractMessage(ctx);
+  const [instructions, skillBundle] = await Promise.all([
+    readManagedInstructions(config, ctx.onLog),
+    readSelectedSkillMarkdown(config, ctx.onLog),
+  ]);
+
+  const sections = [basePrompt];
+  if (instructions.content) {
+    sections.push(
+      [
+        "Managed agent instructions (from instructionsFilePath):",
+        "```markdown",
+        instructions.content,
+        "```",
+      ].join("\n"),
+    );
+  }
+  if (skillBundle.sections.length > 0) {
+    sections.push(["Paperclip runtime skills:", ...skillBundle.sections].join("\n\n"));
+  }
+
+  return {
+    prompt: sections.join("\n\n---\n\n"),
+    attachedSkills: skillBundle.selectedKeys,
+    hasManagedInstructions: Boolean(instructions.content),
+  };
 }
 
 function extractMessage(ctx: AdapterExecutionContext): string {
@@ -136,7 +268,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const input = extractMessage(ctx);
+  const promptInput = await buildPromptInput(ctx, config);
+  const input = promptInput.prompt;
   const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
   const wakeSource = asString(ctx.context.wakeSource, "").trim();
   const wakeReason = asString(ctx.context.wakeReason, "").trim();
@@ -144,6 +277,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const taskKey = asString(ctx.context.taskKey, "").trim() || ctx.runtime.taskKey || "";
   const issueId = asString(ctx.context.issueId, "").trim();
   const forceFreshSession = ctx.context.forceFreshSession === true;
+  const strategicContext = parseObject(ctx.context.paperclipStrategicContext);
   const body: Record<string, unknown> = {
     input,
     // Ironclaw extension field. Used to persist Paperclip-side invocation
@@ -160,6 +294,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         wakeTriggerDetail: wakeTriggerDetail || null,
         taskKey: taskKey || null,
         issueId: issueId || null,
+        strategicContext: Object.keys(strategicContext).length > 0 ? strategicContext : null,
+        runtimeSkills: promptInput.attachedSkills,
+        managedInstructionsAttached: promptInput.hasManagedInstructions,
       },
       conversation: {
         label: buildConversationLabel(agentLabel),
@@ -206,6 +343,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               : "deterministic_agent_seed",
           previousResponseId: effectivePreviousResponseId || null,
         },
+        managedInstructionsAttached: promptInput.hasManagedInstructions,
+        runtimeSkillsAttached: promptInput.attachedSkills,
       },
       prompt: input,
       promptMetrics: {

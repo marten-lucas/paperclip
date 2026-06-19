@@ -3,13 +3,18 @@ import { execute } from "./execute.js";
 import { testEnvironment } from "./test.js";
 import { getConfigSchema } from "./config-schema.js";
 import { ironclawHttpModels } from "./models-cache.js";
+import { listIronclawSkills, syncIronclawSkills } from "./skills.js";
 
 export const ironclawHttpAdapter: ServerAdapterModule = {
   type: "ironclaw_http",
   execute,
   testEnvironment,
+  listSkills: listIronclawSkills,
+  syncSkills: syncIronclawSkills,
   supportsLocalAgentJwt: true,
   supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: false,
   models: ironclawHttpModels,
   getConfigSchema,
   agentConfigurationDoc: `# ironclaw_http agent configuration
