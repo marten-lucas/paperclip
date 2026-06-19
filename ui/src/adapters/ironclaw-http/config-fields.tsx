@@ -54,6 +54,59 @@ export function IronclawHttpConfigFields({
           max="3600"
         />
       </Field>
+
+      <Field
+        label="Temperature"
+        hint="Optional response temperature forwarded to Ironclaw."
+      >
+        <DraftInput
+          value={String(getSchemaValue("temperature", ""))}
+          onCommit={(v) => {
+            const trimmed = v.trim();
+            if (!trimmed) {
+              setSchemaValue("temperature", undefined);
+              return;
+            }
+            const parsed = Number.parseFloat(trimmed);
+            if (!Number.isFinite(parsed)) return;
+            const clamped = Math.max(0, Math.min(2, parsed));
+            setSchemaValue("temperature", Number(clamped.toFixed(2)));
+          }}
+          immediate
+          type="number"
+          className={inputClass}
+          placeholder="e.g. 0.2"
+          min="0"
+          max="2"
+          step="0.1"
+        />
+      </Field>
+
+      <Field
+        label="Max output tokens"
+        hint="Optional output token cap forwarded as max_output_tokens."
+      >
+        <DraftInput
+          value={String(getSchemaValue("maxOutputTokens", ""))}
+          onCommit={(v) => {
+            const trimmed = v.trim();
+            if (!trimmed) {
+              setSchemaValue("maxOutputTokens", undefined);
+              return;
+            }
+            const parsed = Number.parseInt(trimmed, 10);
+            if (!Number.isFinite(parsed)) return;
+            const clamped = Math.max(1, Math.min(100000, parsed));
+            setSchemaValue("maxOutputTokens", clamped);
+          }}
+          immediate
+          type="number"
+          className={inputClass}
+          placeholder="e.g. 4000"
+          min="1"
+          max="100000"
+        />
+      </Field>
     </>
   );
 }
