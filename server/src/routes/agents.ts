@@ -3253,6 +3253,36 @@ export function agentRoutes(
   //    SkippedWakeupResponse; the legacy endpoint stays on the simpler
   //    { status: "skipped" } shape for backward compat.
   type HeartbeatSource = "timer" | "assignment" | "on_demand" | "automation";
+  const shouldForceFreshSessionForAdHocManualWake = (input: {
+    payload?: Record<string, unknown> | null;
+    triggerDetail: string;
+    requestedForceFreshSession: boolean;
+  }) => {
+    if (input.requestedForceFreshSession) return true;
+    if (input.triggerDetail !== "manual") return false;
+    const payload = input.payload ?? null;
+    if (!payload) return false;
+
+    const readText = (value: unknown) => typeof value === "string" ? value.trim() : "";
+    const hasIssueScope = Boolean(
+      readText(payload.issueId) ||
+      readText(payload.taskId) ||
+      readText(payload.resumeFromRunId),
+    );
+    if (hasIssueScope) return false;
+
+    return Boolean(
+      readText(payload.taskKey) ||
+      readText(payload.taskTitle) ||
+      readText(payload.title) ||
+      readText(payload.summary) ||
+      readText(payload.taskDescription) ||
+      readText(payload.description) ||
+      readText(payload.taskMarkdown) ||
+      readText(payload.paperclipTaskMarkdown),
+    );
+  };
+
   const buildManualTaskMarkdown = (input: {
     reason?: string | null;
     payload?: Record<string, unknown> | null;
@@ -3326,6 +3356,28 @@ export function agentRoutes(
       });
       return;
     }
+    const manualWakePayload =
+      req.body.payload && typeof req.body.payload === "object" && !Array.isArray(req.body.payload)
+        ? req.body.payload as Record<string, unknown>
+        : null;
+    const shouldForceFreshSession = shouldForceFreshSessionForAdHocManualWake({
+      payload: manualWakePayload,
+      triggerDetail: typeof req.body.triggerDetail === "string" ? req.body.triggerDetail : "manual",
+      requestedForceFreshSession: req.body.forceFreshSession === true,
+    });
+    const contextSnapshot: Record<string, unknown> = {
+      triggeredBy: req.actor.type,
+      actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+      manualTaskMarkdown: buildManualTaskMarkdown({
+        reason: typeof req.body.reason === "string" ? req.body.reason : null,
+        payload: manualWakePayload,
+        actorType: req.actor.type,
+        actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+      }),
+    };
+    if (shouldForceFreshSession) {
+      contextSnapshot.forceFreshSession = true;
+    }
 
     const run = await heartbeat.wakeup(id, {
       source: opts.source,
@@ -3335,20 +3387,7 @@ export function agentRoutes(
       idempotencyKey: req.body.idempotencyKey ?? null,
       requestedByActorType: req.actor.type === "agent" ? "agent" : "user",
       requestedByActorId: req.actor.type === "agent" ? req.actor.agentId ?? null : req.actor.userId ?? null,
-      contextSnapshot: {
-        triggeredBy: req.actor.type,
-        actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
-        forceFreshSession: req.body.forceFreshSession === true,
-        manualTaskMarkdown: buildManualTaskMarkdown({
-          reason: typeof req.body.reason === "string" ? req.body.reason : null,
-          payload:
-            req.body.payload && typeof req.body.payload === "object" && !Array.isArray(req.body.payload)
-              ? req.body.payload as Record<string, unknown>
-              : null,
-          actorType: req.actor.type,
-          actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
-        }),
-      },
+      contextSnapshot,
     });
 
     if (!run) {
@@ -3417,19 +3456,25 @@ export function agentRoutes(
       forceFreshSession: unknown;
       triggerDetail: unknown;
     }>;
+    const manualWakePayload = body.payload && typeof body.payload === "object" && !Array.isArray(body.payload)
+      ? body.payload as Record<string, unknown>
+      : null;
+    const shouldForceFreshSession = shouldForceFreshSessionForAdHocManualWake({
+      payload: manualWakePayload,
+      triggerDetail: typeof body.triggerDetail === "string" ? body.triggerDetail : "manual",
+      requestedForceFreshSession: body.forceFreshSession === true,
+    });
     const contextSnapshot: Record<string, unknown> = {
       triggeredBy: req.actor.type,
       actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
       manualTaskMarkdown: buildManualTaskMarkdown({
         reason: typeof body.reason === "string" ? body.reason : null,
-        payload: body.payload && typeof body.payload === "object" && !Array.isArray(body.payload)
-          ? body.payload as Record<string, unknown>
-          : null,
+        payload: manualWakePayload,
         actorType: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
       }),
     };
-    if (body.forceFreshSession === true) {
+    if (shouldForceFreshSession) {
       contextSnapshot.forceFreshSession = true;
     }
     const wakeOpts: Parameters<typeof heartbeat.wakeup>[1] = {

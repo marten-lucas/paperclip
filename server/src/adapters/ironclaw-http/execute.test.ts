@@ -345,4 +345,51 @@ describe("ironclaw_http execute", () => {
     expect(requestBody.input).toContain("CEO heartbeat task:\n\nManual wake task context:");
     expect(result.exitCode).toBe(0);
   });
+
+  it("omits previous_response_id when forceFreshSession is requested", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_400",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-8",
+      agent: {
+        id: "agent-8",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: { responseId: "resp_existing" },
+        sessionDisplayId: null,
+        taskKey: "adhoc-task",
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        forceFreshSession: true,
+        manualTaskMarkdown: "Manual wake task context:\n- Task key: \"adhoc-task\"",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.previous_response_id).toBeUndefined();
+    expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
+    expect(result.exitCode).toBe(0);
+  });
 });

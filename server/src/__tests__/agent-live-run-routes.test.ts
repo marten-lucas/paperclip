@@ -620,4 +620,48 @@ describe("agent live run routes", () => {
       },
     });
   });
+
+  it("forces a fresh session for ad-hoc manual wakes without issue scope", async () => {
+    const res = await requestApp(
+      await createApp(),
+      (baseUrl) => request(baseUrl)
+        .post(`/api/agents/${routeAgentId}/heartbeat/invoke?companyId=company-1`)
+        .send({
+          reason: "onboarding_gate_verification",
+          payload: {
+            taskKey: "onboarding-gate-check",
+            taskTitle: "Onboarding gate verification",
+            summary: "Validate onboarding acceptance state",
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(202);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(routeAgentId, {
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "onboarding_gate_verification",
+      payload: {
+        taskKey: "onboarding-gate-check",
+        taskTitle: "Onboarding gate verification",
+        summary: "Validate onboarding acceptance state",
+      },
+      requestedByActorType: "user",
+      requestedByActorId: "local-board",
+      contextSnapshot: {
+        triggeredBy: "board",
+        actorId: "local-board",
+        forceFreshSession: true,
+        manualTaskMarkdown: [
+          "Manual wake task context:",
+          "- Reason: \"onboarding_gate_verification\"",
+          "- Task key: \"onboarding-gate-check\"",
+          "- Title: \"Onboarding gate verification\"",
+          "- Summary: \"Validate onboarding acceptance state\"",
+          "",
+          "Use this manual wake context as the current assignment.",
+        ].join("\n"),
+      },
+    });
+  });
 });

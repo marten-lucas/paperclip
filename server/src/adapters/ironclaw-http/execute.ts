@@ -143,6 +143,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const wakeTriggerDetail = asString(ctx.context.wakeTriggerDetail, "").trim();
   const taskKey = asString(ctx.context.taskKey, "").trim() || ctx.runtime.taskKey || "";
   const issueId = asString(ctx.context.issueId, "").trim();
+  const forceFreshSession = ctx.context.forceFreshSession === true;
   const body: Record<string, unknown> = {
     input,
     // Ironclaw extension field. Used to persist Paperclip-side invocation
@@ -175,8 +176,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? asString((ctx.runtime.sessionParams as Record<string, unknown>).responseId, "")
       : "";
   const seededPreviousResponseId = buildSeededPreviousResponseId(ctx.agent.id);
-  const effectivePreviousResponseId = previousResponseId || seededPreviousResponseId;
-  body.previous_response_id = effectivePreviousResponseId;
+  const effectivePreviousResponseId = forceFreshSession
+    ? ""
+    : (previousResponseId || seededPreviousResponseId);
+  if (effectivePreviousResponseId) {
+    body.previous_response_id = effectivePreviousResponseId;
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
@@ -194,8 +199,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           token: asString(env.IRONCLAW_API_KEY, "").trim().length > 0 ? "env.IRONCLAW_API_KEY" : "adapterConfig.authToken",
         },
         conversation: {
-          strategy: previousResponseId ? "session_previous_response_id" : "deterministic_agent_seed",
-          previousResponseId: effectivePreviousResponseId,
+          strategy: forceFreshSession
+            ? "fresh_session"
+            : previousResponseId
+              ? "session_previous_response_id"
+              : "deterministic_agent_seed",
+          previousResponseId: effectivePreviousResponseId || null,
         },
       },
       prompt: input,
