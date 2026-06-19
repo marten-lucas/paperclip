@@ -142,7 +142,7 @@ async function readSelectedSkillMarkdown(
 async function buildPromptInput(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-): Promise<{ prompt: string; attachedSkills: string[]; hasManagedInstructions: boolean }> {
+): Promise<{ prompt: string; attachedSkills: string[]; hasManagedInstructions: boolean; instructions: string | null }> {
   const basePrompt = extractMessage(ctx);
   const [instructions, skillBundle] = await Promise.all([
     readManagedInstructions(config, ctx.onLog),
@@ -150,16 +150,6 @@ async function buildPromptInput(
   ]);
 
   const sections = [basePrompt];
-  if (instructions.content) {
-    sections.push(
-      [
-        "Managed agent instructions (from instructionsFilePath):",
-        "```markdown",
-        instructions.content,
-        "```",
-      ].join("\n"),
-    );
-  }
   if (skillBundle.sections.length > 0) {
     sections.push(["Paperclip runtime skills:", ...skillBundle.sections].join("\n\n"));
   }
@@ -168,7 +158,23 @@ async function buildPromptInput(
     prompt: sections.join("\n\n---\n\n"),
     attachedSkills: skillBundle.selectedKeys,
     hasManagedInstructions: Boolean(instructions.content),
+    instructions: instructions.content,
   };
+}
+
+function parseConfiguredMetadata(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function parseMetadataJson(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parseConfiguredMetadata(parsed);
+  } catch {
+    return null;
+  }
 }
 
 function extractMessage(ctx: AdapterExecutionContext): string {
@@ -278,6 +284,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const issueId = asString(ctx.context.issueId, "").trim();
   const forceFreshSession = ctx.context.forceFreshSession === true;
   const strategicContext = parseObject(ctx.context.paperclipStrategicContext);
+  const configuredMetadata =
+    parseConfiguredMetadata(config.metadata) ?? parseMetadataJson(config.metadataJson) ?? null;
+  const temperature = asNumber(config.temperature, Number.NaN);
+  const maxOutputTokens = Math.max(0, Math.floor(asNumber(config.maxOutputTokens ?? config.max_output_tokens, 0)));
   const body: Record<string, unknown> = {
     input,
     // Ironclaw extension field. Used to persist Paperclip-side invocation
@@ -297,6 +307,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         strategicContext: Object.keys(strategicContext).length > 0 ? strategicContext : null,
         runtimeSkills: promptInput.attachedSkills,
         managedInstructionsAttached: promptInput.hasManagedInstructions,
+        requestControls: {
+          temperature: Number.isFinite(temperature) ? temperature : null,
+          maxOutputTokens: maxOutputTokens > 0 ? maxOutputTokens : null,
+          metadataAttached: Boolean(configuredMetadata),
+        },
       },
       conversation: {
         label: buildConversationLabel(agentLabel),
@@ -304,9 +319,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     },
   };
+  if (promptInput.instructions) {
+    body.instructions = promptInput.instructions;
+  }
+  if (configuredMetadata) {
+    body.metadata = configuredMetadata;
+  }
   // Ironclaw currently supports the implicit default model only.
   // Send "model" only when the caller explicitly requests "default".
   if (requestModel) body.model = requestModel;
+  if (Number.isFinite(temperature) && temperature >= 0 && temperature <= 2) {
+    body.temperature = temperature;
+  }
+  if (maxOutputTokens > 0) {
+    body.max_output_tokens = maxOutputTokens;
+  }
 
   const previousResponseId =
     ctx.runtime.sessionParams && typeof ctx.runtime.sessionParams === "object"

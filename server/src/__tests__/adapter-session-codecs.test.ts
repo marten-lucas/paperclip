@@ -14,6 +14,7 @@ import {
   isOpenCodeUnknownSessionError,
 } from "@paperclipai/adapter-opencode-local/server";
 import { sessionCodec as acpxSessionCodec } from "@paperclipai/adapter-acpx-local/server";
+import { sessionCodec as ironclawSessionCodec } from "../adapters/ironclaw-http/index.js";
 
 describe("adapter session codecs", () => {
   it("normalizes claude session params with cwd", () => {
@@ -151,6 +152,21 @@ describe("adapter session codecs", () => {
     });
     expect(acpxSessionCodec.serialize(parsed)).toEqual(parsed);
     expect(acpxSessionCodec.getDisplayId?.(parsed)).toBe("runtime-session-1");
+  });
+
+  it("normalizes ironclaw response session params", () => {
+    const parsed = ironclawSessionCodec.deserialize({
+      response_id: "resp_abc123",
+    });
+    expect(parsed).toEqual({
+      responseId: "resp_abc123",
+    });
+
+    const serialized = ironclawSessionCodec.serialize(parsed);
+    expect(serialized).toEqual({
+      responseId: "resp_abc123",
+    });
+    expect(ironclawSessionCodec.getDisplayId?.(serialized ?? null)).toBe("resp_abc123");
   });
 });
 

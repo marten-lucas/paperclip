@@ -219,6 +219,13 @@ describe("adapter routes", () => {
     expect(ironclawHttp).toBeDefined();
     expect(ironclawHttp.capabilities.supportsSkills).toBe(true);
 
+    const ironclawAdapter = findServerAdapter("ironclaw_http");
+    expect(ironclawAdapter).toBeDefined();
+    expect(ironclawAdapter?.sessionManagement).toMatchObject({
+      supportsSessionResume: true,
+      nativeContextManagement: "confirmed",
+    });
+
     // acpx_local exposes runtime-aware skill snapshots for Claude/Codex/custom ACP agents
     const acpxLocal = res.body.find((a: any) => a.type === "acpx_local");
     expect(acpxLocal).toBeDefined();

@@ -1,14 +1,54 @@
-import type { ServerAdapterModule } from "../types.js";
+import type { AdapterSessionCodec, ServerAdapterModule } from "../types.js";
+import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 import { testEnvironment } from "./test.js";
 import { getConfigSchema } from "./config-schema.js";
 import { ironclawHttpModels } from "./models-cache.js";
 import { listIronclawSkills, syncIronclawSkills } from "./skills.js";
 
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+export const sessionCodec: AdapterSessionCodec = {
+  deserialize(raw: unknown) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const record = raw as Record<string, unknown>;
+    const responseId = readNonEmptyString(record.responseId) ?? readNonEmptyString(record.response_id);
+    if (!responseId) return null;
+    return { responseId };
+  },
+  serialize(params: Record<string, unknown> | null) {
+    if (!params) return null;
+    const responseId = readNonEmptyString(params.responseId) ?? readNonEmptyString(params.response_id);
+    if (!responseId) return null;
+    return { responseId };
+  },
+  getDisplayId(params: Record<string, unknown> | null) {
+    if (!params) return null;
+    return readNonEmptyString(params.responseId) ?? readNonEmptyString(params.response_id);
+  },
+};
+
+const sessionManagement =
+  getAdapterSessionManagement("ironclaw_http") ??
+  {
+    supportsSessionResume: true,
+    nativeContextManagement: "confirmed" as const,
+    defaultSessionCompaction: {
+      enabled: true,
+      maxSessionRuns: 0,
+      maxRawInputTokens: 0,
+      maxSessionAgeHours: 0,
+    },
+  };
+
 export const ironclawHttpAdapter: ServerAdapterModule = {
   type: "ironclaw_http",
   execute,
   testEnvironment,
+  sessionCodec,
+  sessionManagement,
   listSkills: listIronclawSkills,
   syncSkills: syncIronclawSkills,
   supportsLocalAgentJwt: true,
@@ -16,6 +56,8 @@ export const ironclawHttpAdapter: ServerAdapterModule = {
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: false,
   models: ironclawHttpModels,
+  listModels: async () => ironclawHttpModels,
+  refreshModels: async () => ironclawHttpModels,
   getConfigSchema,
   agentConfigurationDoc: `# ironclaw_http agent configuration
 
@@ -25,9 +67,14 @@ Core fields:
 - env.IRONCLAW_BASE_URL (string, required): Ironclaw gateway API base URL
 - env.IRONCLAW_API_KEY (string, required): bearer token for Ironclaw API access (recommended: secret_ref)
 - model (string, optional): default model id for requests
+- instructionsFilePath (string, optional): managed instructions file path; preferred over inline instructions
+- temperature (number, optional): response temperature, forwarded as request temperature
+- maxOutputTokens (number, optional): response output token cap, forwarded as request max_output_tokens
+- metadataJson (string, optional): JSON object string forwarded as request metadata
 - timeoutSec (number, optional): request timeout in seconds (default 120)
 
 Notes:
 - Agent instructions should come from the agent Instructions settings, not adapterConfig.instructions.
+- Paperclip injects managed instructions separately into the Ironclaw instructions field and reserves the prompt body for the task payload.
 `,
 };

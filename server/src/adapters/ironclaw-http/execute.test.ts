@@ -396,7 +396,7 @@ describe("ironclaw_http execute", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("injects managed instructions and selected runtime skills into the outbound prompt", async () => {
+  it("injects managed instructions separately and selected runtime skills into the outbound prompt", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ironclaw-execute-test-"));
     const instructionsPath = path.join(tempDir, "AGENTS.md");
     const skillDir = path.join(tempDir, "paperclip-converting-plans-to-tasks");
@@ -437,6 +437,12 @@ describe("ironclaw_http execute", () => {
             IRONCLAW_API_KEY: "token-123",
           },
           instructionsFilePath: instructionsPath,
+          metadata: {
+            source: "nextcloud-talk",
+            channel: "operations",
+          },
+          temperature: 0.25,
+          maxOutputTokens: 1234,
           paperclipRuntimeSkills: [
             {
               key: "paperclip-converting-plans-to-tasks",
@@ -461,13 +467,25 @@ describe("ironclaw_http execute", () => {
 
       const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
       const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
-      expect(requestBody.input).toContain("Managed agent instructions");
-      expect(requestBody.input).toContain("Always decompose approved plans.");
+      expect(requestBody.input).not.toContain("Managed agent instructions");
+      expect(requestBody.input).not.toContain("Always decompose approved plans.");
+      expect(requestBody.instructions).toContain("Always decompose approved plans.");
       expect(requestBody.input).toContain("Paperclip runtime skills");
       expect(requestBody.input).toContain("Skill: paperclip-converting-plans-to-tasks");
       expect(requestBody.input).toContain("Use blockedByIssueIds for real blockers.");
+      expect(requestBody.metadata).toMatchObject({
+        source: "nextcloud-talk",
+        channel: "operations",
+      });
+      expect(requestBody.temperature).toBe(0.25);
+      expect(requestBody.max_output_tokens).toBe(1234);
       expect(requestBody.x_context.paperclip.runtimeSkills).toEqual(["paperclip-converting-plans-to-tasks"]);
       expect(requestBody.x_context.paperclip.managedInstructionsAttached).toBe(true);
+      expect(requestBody.x_context.paperclip.requestControls).toMatchObject({
+        temperature: 0.25,
+        maxOutputTokens: 1234,
+        metadataAttached: true,
+      });
       expect(requestBody.x_context.paperclip.strategicContext).toMatchObject({
         company: { id: "company-1", name: "AHOA" },
       });
