@@ -25,15 +25,16 @@ export async function testEnvironment(
 ): Promise<AdapterEnvironmentTestResult> {
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
-  const url = asString(config.url, "").trim();
-  const authToken = asString(config.authToken, "").trim();
+  const env = parseObject(config.env);
+  const url = asString(env.IRONCLAW_BASE_URL, "").trim() || asString(config.url, "").trim();
+  const authToken = asString(env.IRONCLAW_API_KEY, "").trim() || asString(config.authToken, "").trim();
 
   if (!url) {
     checks.push({
       code: "ironclaw_url_missing",
       level: "error",
       message: "Missing required configuration: url",
-      hint: "Set Gateway API URL to your Ironclaw base URL.",
+      hint: "Set adapterConfig.env.IRONCLAW_BASE_URL (secret/plain env binding) to your Ironclaw base URL.",
     });
   } else {
     try {
@@ -66,7 +67,7 @@ export async function testEnvironment(
       code: "ironclaw_auth_missing",
       level: "error",
       message: "Missing required configuration: authToken",
-      hint: "Set Gateway API Token to a valid Ironclaw bearer token.",
+      hint: "Set adapterConfig.env.IRONCLAW_API_KEY (secret/plain env binding) to a valid Ironclaw bearer token.",
     });
   }
 

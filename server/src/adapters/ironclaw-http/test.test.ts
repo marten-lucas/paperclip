@@ -6,7 +6,7 @@ afterEach(() => {
 });
 
 describe("ironclaw_http testEnvironment", () => {
-  it("fails when url/authToken are missing", async () => {
+  it("fails when IRONCLAW_BASE_URL/IRONCLAW_API_KEY are missing", async () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "ironclaw_http",
@@ -18,8 +18,11 @@ describe("ironclaw_http testEnvironment", () => {
     expect(result.checks.some((check) => check.code === "ironclaw_auth_missing")).toBe(true);
   });
 
-  it("discovers models from list-models endpoint", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ models: ["qwen3:8b", "mistral-nemo:12b"] }), {
+  it("discovers models from OpenAI-compatible /v1/models endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      object: "list",
+      data: [{ id: "qwen3:8b" }, { id: "mistral-nemo:12b" }],
+    }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
@@ -29,8 +32,10 @@ describe("ironclaw_http testEnvironment", () => {
       companyId: "company-1",
       adapterType: "ironclaw_http",
       config: {
-        url: "http://10.12.12.102:3000",
-        authToken: "token-123",
+        env: {
+          IRONCLAW_BASE_URL: "http://10.12.12.102:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
       },
     });
 

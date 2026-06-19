@@ -76,11 +76,13 @@ function toUsage(usage: unknown): AdapterExecutionResult["usage"] | undefined {
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const config = parseObject(ctx.config);
-  const url = resolveBaseUrl(asString(config.url, ""));
-  const authToken = asString(config.authToken, "").trim();
+  const env = parseObject(config.env);
+  const resolvedUrl = asString(env.IRONCLAW_BASE_URL, "").trim() || asString(config.url, "").trim();
+  const resolvedToken = asString(env.IRONCLAW_API_KEY, "").trim() || asString(config.authToken, "").trim();
+  const url = resolveBaseUrl(resolvedUrl);
+  const authToken = resolvedToken;
   const requestedModel = asString(config.model, "").trim();
   const requestModel = requestedModel.toLowerCase() === "default" ? "default" : "";
-  const instructions = asString(config.instructions, "").trim();
   const timeoutSec = Math.max(1, Math.min(3600, asNumber(config.timeoutSec, 120)));
 
   if (!url || !authToken) {
@@ -100,7 +102,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Ironclaw currently supports the implicit default model only.
   // Send "model" only when the caller explicitly requests "default".
   if (requestModel) body.model = requestModel;
-  if (instructions) body.instructions = instructions;
 
   const previousResponseId =
     ctx.runtime.sessionParams && typeof ctx.runtime.sessionParams === "object"
@@ -120,6 +121,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       context: {
         model: requestModel || "(default)",
         requestedModel: requestedModel || "(default)",
+        auth: authToken ? "configured" : "missing",
+        source: {
+          url: asString(env.IRONCLAW_BASE_URL, "").trim().length > 0 ? "env.IRONCLAW_BASE_URL" : "adapterConfig.url",
+          token: asString(env.IRONCLAW_API_KEY, "").trim().length > 0 ? "env.IRONCLAW_API_KEY" : "adapterConfig.authToken",
+        },
       },
       prompt: input,
       promptMetrics: {

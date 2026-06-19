@@ -31,7 +31,7 @@ describe("ironclaw_http execute", () => {
     expect(result.errorCode).toBe("ironclaw_config_missing");
   });
 
-  it("omits non-default model in request body and stores response id", async () => {
+  it("reads URL/token from env bindings, omits non-default model, and stores response id", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_123",
       model: "qwen3:8b",
@@ -60,8 +60,10 @@ describe("ironclaw_http execute", () => {
         taskKey: null,
       },
       config: {
-        url: "http://127.0.0.1:3000",
-        authToken: "token-123",
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
         model: "qwen3:8b",
       },
       context: {
@@ -112,8 +114,10 @@ describe("ironclaw_http execute", () => {
         taskKey: null,
       },
       config: {
-        url: "http://127.0.0.1:3000",
-        authToken: "token-123",
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
         model: "default",
       },
       context: {
