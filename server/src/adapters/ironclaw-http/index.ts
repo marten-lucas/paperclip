@@ -8,6 +8,8 @@ export const ironclawHttpAdapter: ServerAdapterModule = {
   type: "ironclaw_http",
   execute,
   testEnvironment,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
   models: ironclawHttpModels,
   getConfigSchema,
   agentConfigurationDoc: `# ironclaw_http agent configuration

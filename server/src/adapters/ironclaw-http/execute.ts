@@ -78,7 +78,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const config = parseObject(ctx.config);
   const url = resolveBaseUrl(asString(config.url, ""));
   const authToken = asString(config.authToken, "").trim();
-  const model = asString(config.model, "").trim();
+  const requestedModel = asString(config.model, "").trim();
+  const requestModel = requestedModel.toLowerCase() === "default" ? "default" : "";
   const instructions = asString(config.instructions, "").trim();
   const timeoutSec = Math.max(1, Math.min(3600, asNumber(config.timeoutSec, 120)));
 
@@ -96,7 +97,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const body: Record<string, unknown> = {
     input,
   };
-  if (model) body.model = model;
+  // Ironclaw currently supports the implicit default model only.
+  // Send "model" only when the caller explicitly requests "default".
+  if (requestModel) body.model = requestModel;
   if (instructions) body.instructions = instructions;
 
   const previousResponseId =
@@ -115,7 +118,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       adapterType: "ironclaw_http",
       command: `POST ${url}`,
       context: {
-        model: model || "(default)",
+        model: requestModel || "(default)",
+        requestedModel: requestedModel || "(default)",
       },
       prompt: input,
       promptMetrics: {
@@ -158,10 +162,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode: 0,
       signal: null,
       timedOut: false,
-      model: asString(payload.model, model || null),
+      model: asString(payload.model, requestModel || null),
       usage: toUsage(payload.usage),
       resultJson: payload,
-      summary: `Ironclaw HTTP ${model || "default model"}`,
+      summary: `Ironclaw HTTP ${requestModel || "default model"}`,
       sessionParams: responseId ? { responseId } : undefined,
       sessionDisplayId: responseId || undefined,
     };
