@@ -397,6 +397,26 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const [refreshModelsError, setRefreshModelsError] = useState<string | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const rawModels = fetchedModels ?? externalModels ?? [];
+  const detectModelKeySalt = useMemo(() => {
+    if (adapterType !== "ironclaw_http") return "default";
+    const configForDetect = buildAdapterConfigForTest() as Record<string, unknown>;
+    const env =
+      typeof configForDetect.env === "object" && configForDetect.env !== null
+        ? (configForDetect.env as Record<string, unknown>)
+        : {};
+    const baseUrl =
+      typeof env.IRONCLAW_BASE_URL === "string"
+        ? env.IRONCLAW_BASE_URL.trim()
+        : "";
+    const authValue = env.IRONCLAW_API_KEY;
+    const authState =
+      authValue == null
+        ? "missing"
+        : typeof authValue === "string"
+          ? (authValue.trim().length > 0 ? "plain" : "missing")
+          : "secret";
+    return `${baseUrl}|${authState}|${currentDefaultEnvironmentId || ""}`;
+  }, [adapterType, currentDefaultEnvironmentId, isCreate, val, config, overlay.adapterConfig]);
   const adapterCommandField =
     adapterType === "hermes_local" ? "hermesCommand" : "command";
   const acpxAgent =
@@ -405,22 +425,22 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         ? String(val!.adapterSchemaValues?.agent ?? "claude")
         : eff("adapterConfig", "agent", String(config.agent ?? "claude"))
       : "";
-  const models = useMemo(
-    () => adapterType === "acpx_local"
-      ? filterAcpxModelsByAgent(rawModels, acpxAgent)
-      : rawModels,
-    [adapterType, rawModels, acpxAgent],
-  );
   const {
     data: detectedModelData,
     refetch: refetchDetectedModel,
   } = useQuery({
     queryKey: selectedCompanyId
-      ? queryKeys.agents.detectModel(selectedCompanyId, adapterType)
+      ? [...queryKeys.agents.detectModel(selectedCompanyId, adapterType), detectModelKeySalt]
       : ["agents", "none", "detect-model", adapterType],
     queryFn: () => {
       if (!selectedCompanyId) {
         throw new Error("Select a company to detect the model");
+      }
+      if (adapterType === "ironclaw_http") {
+        return agentsApi.detectModelWithConfig(selectedCompanyId, adapterType, {
+          adapterConfig: buildAdapterConfigForTest(),
+          environmentId: currentDefaultEnvironmentId || null,
+        });
       }
       return agentsApi.detectModel(selectedCompanyId, adapterType);
     },
@@ -428,6 +448,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   });
   const detectedModel = detectedModelData?.model ?? null;
   const detectedModelCandidates = detectedModelData?.candidates ?? [];
+  const detectedCandidateModels = useMemo(
+    () => detectedModelCandidates.map((id) => ({ id, label: id })),
+    [detectedModelCandidates],
+  );
+  const models = useMemo(
+    () => {
+      const fallbackModels = rawModels.length > 0 ? rawModels : detectedCandidateModels;
+      return adapterType === "acpx_local"
+        ? filterAcpxModelsByAgent(fallbackModels, acpxAgent)
+        : fallbackModels;
+    },
+    [adapterType, rawModels, detectedCandidateModels, acpxAgent],
+  );
 
   const { data: companyAgents = [] } = useQuery({
     queryKey: selectedCompanyId ? queryKeys.agents.list(selectedCompanyId) : ["agents", "none", "list"],
@@ -506,6 +539,21 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         adapterConfig: buildAdapterConfigForTest(),
         environmentId: currentDefaultEnvironmentId || null,
       });
+    },
+    onSuccess: async (result) => {
+      if (!selectedCompanyId || result.status === "fail") return;
+      try {
+        const refreshed = await agentsApi.adapterModels(selectedCompanyId, adapterType, {
+          refresh: true,
+          environmentId: currentDefaultEnvironmentId || null,
+        });
+        queryClient.setQueryData(modelQueryKey, refreshed);
+        if (refreshed.length > 0) {
+          await refetchDetectedModel();
+        }
+      } catch {
+        // Keep the test result visible even if model refresh fails.
+      }
     },
   });
   const testEnvironmentDisabled = testEnvironment.isPending || !selectedCompanyId;

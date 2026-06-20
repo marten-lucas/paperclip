@@ -9,6 +9,16 @@ export function refreshIronclawHttpModels(models: string[]): void {
     .map((model) => ({ id: model, label: model })));
 }
 
+function isHttpUrl(value: string): boolean {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve URL + token from environment variables.
  * Supports the same keys the adapter config env binding uses so operators
@@ -16,8 +26,18 @@ export function refreshIronclawHttpModels(models: string[]): void {
  * discovery work automatically on startup / refresh.
  */
 function resolveEnvCredentials(): { url: string; token: string } | null {
-  const url = (process.env.IRONCLAW_BASE_URL ?? "").trim();
-  const token = (process.env.IRONCLAW_API_KEY ?? "").trim();
+  const rawUrl = (process.env.IRONCLAW_BASE_URL ?? "").trim();
+  const rawToken = (process.env.IRONCLAW_API_KEY ?? "").trim();
+  const url = isHttpUrl(rawUrl)
+    ? rawUrl
+    : isHttpUrl(rawToken)
+      ? rawToken
+      : rawUrl;
+  const token = !isHttpUrl(rawToken) && rawToken
+    ? rawToken
+    : !isHttpUrl(rawUrl) && rawUrl
+      ? rawUrl
+      : rawToken;
   if (!url || !token) return null;
   return { url, token };
 }

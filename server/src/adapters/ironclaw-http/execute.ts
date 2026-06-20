@@ -23,11 +23,22 @@ type RuntimeSkillEntry = {
   required: boolean;
 };
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function resolveBaseUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!trimmed) return "";
-  if (trimmed.endsWith("/api/v1/responses")) return trimmed;
-  return `${trimmed.replace(/\/$/, "")}/api/v1/responses`;
+  const normalized = trimmed.endsWith("/api/v1/responses")
+    ? trimmed
+    : `${trimmed.replace(/\/$/, "")}/api/v1/responses`;
+  return isHttpUrl(normalized) ? normalized : "";
 }
 
 function toUuidHex(value: string): string {
@@ -177,6 +188,12 @@ function parseMetadataJson(value: unknown): Record<string, unknown> | null {
   }
 }
 
+function parseThinkingMode(value: unknown): "auto" | "on" | "off" {
+  const normalized = asString(value, "auto").trim().toLowerCase();
+  if (normalized === "on" || normalized === "off") return normalized;
+  return "auto";
+}
+
 function extractMessage(ctx: AdapterExecutionContext): string {
   const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
   const taskMarkdown = asString(ctx.context.paperclipTaskMarkdown, "").trim();
@@ -256,8 +273,18 @@ function toUsage(usage: unknown): AdapterExecutionResult["usage"] | undefined {
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const config = parseObject(ctx.config);
   const env = parseObject(config.env);
-  const resolvedUrl = asString(env.IRONCLAW_BASE_URL, "").trim() || asString(config.url, "").trim();
-  const resolvedToken = asString(env.IRONCLAW_API_KEY, "").trim() || asString(config.authToken, "").trim();
+  const rawBaseUrl = asString(env.IRONCLAW_BASE_URL, "").trim() || asString(config.url, "").trim();
+  const rawApiKey = asString(env.IRONCLAW_API_KEY, "").trim() || asString(config.authToken, "").trim();
+  const resolvedUrl = isHttpUrl(rawBaseUrl)
+    ? rawBaseUrl
+    : isHttpUrl(rawApiKey) && rawApiKey
+      ? rawApiKey
+      : rawBaseUrl;
+  const resolvedToken = !isHttpUrl(rawApiKey) && rawApiKey
+    ? rawApiKey
+    : !isHttpUrl(rawBaseUrl) && rawBaseUrl
+      ? rawBaseUrl
+      : rawApiKey;
   const url = resolveBaseUrl(resolvedUrl);
   const authToken = resolvedToken;
   const requestedModel = asString(config.model, "").trim();
@@ -288,6 +315,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     parseConfiguredMetadata(config.metadata) ?? parseMetadataJson(config.metadataJson) ?? null;
   const temperature = asNumber(config.temperature, Number.NaN);
   const maxOutputTokens = Math.max(0, Math.floor(asNumber(config.maxOutputTokens ?? config.max_output_tokens, 0)));
+  const numCtx = Math.max(0, Math.floor(asNumber(config.numCtx ?? config.num_ctx, 0)));
+  const thinkingMode = parseThinkingMode(config.thinkingMode ?? config.thinking_mode);
   const body: Record<string, unknown> = {
     input,
     // Ironclaw extension field. Used to persist Paperclip-side invocation
@@ -310,6 +339,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         requestControls: {
           temperature: Number.isFinite(temperature) ? temperature : null,
           maxOutputTokens: maxOutputTokens > 0 ? maxOutputTokens : null,
+          numCtx: numCtx > 0 ? numCtx : null,
+          thinkingMode,
           metadataAttached: Boolean(configuredMetadata),
         },
       },
@@ -333,6 +364,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   if (maxOutputTokens > 0) {
     body.max_output_tokens = maxOutputTokens;
+  }
+  if (numCtx > 0) {
+    body.num_ctx = numCtx;
+  }
+  if (thinkingMode !== "auto") {
+    body.thinking_mode = thinkingMode;
   }
 
   const previousResponseId =

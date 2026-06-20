@@ -20,14 +20,37 @@ function resolveModelsUrl(rawUrl: string): string {
   return `${trimmed.replace(/\/$/, "")}/v1/models`;
 }
 
+function isHttpUrl(value: string): boolean {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
   const env = parseObject(config.env);
-  const url = asString(env.IRONCLAW_BASE_URL, "").trim() || asString(config.url, "").trim();
-  const authToken = asString(env.IRONCLAW_API_KEY, "").trim() || asString(config.authToken, "").trim();
+  const rawBaseUrl = asString(env.IRONCLAW_BASE_URL, "").trim() || asString(config.url, "").trim();
+  const rawApiKey = asString(env.IRONCLAW_API_KEY, "").trim() || asString(config.authToken, "").trim();
+
+  // Defensive normalization for UI misconfiguration: if URL and token were
+  // accidentally swapped, recover automatically instead of reporting a hard fail.
+  const url = isHttpUrl(rawBaseUrl)
+    ? rawBaseUrl
+    : isHttpUrl(rawApiKey)
+      ? rawApiKey
+      : rawBaseUrl;
+  const authToken = !isHttpUrl(rawApiKey) && rawApiKey
+    ? rawApiKey
+    : !isHttpUrl(rawBaseUrl) && rawBaseUrl
+      ? rawBaseUrl
+      : rawApiKey;
 
   if (!url) {
     checks.push({

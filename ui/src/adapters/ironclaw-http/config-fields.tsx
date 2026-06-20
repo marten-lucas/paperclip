@@ -37,25 +37,6 @@ export function IronclawHttpConfigFields({
   return (
     <>
       <Field
-        label="Timeout (seconds)"
-        hint="Configure IRONCLAW_BASE_URL and IRONCLAW_API_KEY in Environment variables (secret refs supported)."
-      >
-        <DraftInput
-          value={String(getSchemaValue("timeoutSec", 120))}
-          onCommit={(v) => {
-            const numVal = Math.max(1, Math.min(3600, parseInt(v) || 120));
-            setSchemaValue("timeoutSec", numVal);
-          }}
-          immediate
-          type="number"
-          className={inputClass}
-          placeholder="120"
-          min="1"
-          max="3600"
-        />
-      </Field>
-
-      <Field
         label="Temperature"
         hint="Optional response temperature forwarded to Ironclaw."
       >
@@ -106,6 +87,53 @@ export function IronclawHttpConfigFields({
           min="1"
           max="100000"
         />
+      </Field>
+
+      <Field
+        label="Ollama context window (num_ctx)"
+        hint="Optional Ollama context window size for VRAM/context management."
+      >
+        <DraftInput
+          value={String(getSchemaValue("numCtx", ""))}
+          onCommit={(v) => {
+            const trimmed = v.trim();
+            if (!trimmed) {
+              setSchemaValue("numCtx", undefined);
+              return;
+            }
+            const parsed = Number.parseInt(trimmed, 10);
+            if (!Number.isFinite(parsed)) return;
+            const clamped = Math.max(1, Math.min(262144, parsed));
+            setSchemaValue("numCtx", clamped);
+          }}
+          immediate
+          type="number"
+          className={inputClass}
+          placeholder="e.g. 8192"
+          min="1"
+          max="262144"
+          step="1"
+        />
+      </Field>
+
+      <Field
+        label="Thinking mode"
+        hint="Controls Ollama thinking behavior: auto keeps provider defaults."
+      >
+        <select
+          className={inputClass}
+          value={String(getSchemaValue("thinkingMode", "auto"))}
+          onChange={(event) => {
+            const value = event.target.value;
+            if (value === "on" || value === "off" || value === "auto") {
+              setSchemaValue("thinkingMode", value);
+            }
+          }}
+        >
+          <option value="auto">auto</option>
+          <option value="on">on</option>
+          <option value="off">off</option>
+        </select>
       </Field>
     </>
   );

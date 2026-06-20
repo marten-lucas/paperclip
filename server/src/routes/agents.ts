@@ -1586,6 +1586,7 @@ export function agentRoutes(
   router.get("/companies/:companyId/adapters/:type/models", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    res.set("Cache-Control", "no-store");
     const type = assertKnownAdapterType(req.params.type as string);
     const refresh = typeof req.query.refresh === "string"
       ? ["1", "true", "yes"].includes(req.query.refresh.toLowerCase())
@@ -1618,11 +1619,71 @@ export function agentRoutes(
   router.get("/companies/:companyId/adapters/:type/detect-model", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    res.set("Cache-Control", "no-store");
     const type = assertKnownAdapterType(req.params.type as string);
 
     const detected = await detectAdapterModel(type);
     res.json(detected);
   });
+
+  router.post(
+    "/companies/:companyId/adapters/:type/detect-model",
+    validate(testAdapterEnvironmentSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const type = assertKnownAdapterType(req.params.type as string);
+      await assertCanCreateAgentsForCompany(req, companyId);
+      res.set("Cache-Control", "no-store");
+
+      const adapter = requireServerAdapter(type);
+      const inputAdapterConfig =
+        (req.body?.adapterConfig ?? {}) as Record<string, unknown>;
+      const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
+        companyId,
+        inputAdapterConfig,
+        { strictMode: strictSecretsMode },
+      );
+      const { config: runtimeAdapterConfig } = await secretsSvc.resolveAdapterConfigForRuntime(
+        companyId,
+        normalizedAdapterConfig,
+      );
+
+      // Probe once with the caller-provided draft config so adapters that discover
+      // models from runtime env bindings (e.g. ironclaw_http) can populate caches
+      // without requiring a separate manual "Test connection" click.
+      if (adapter.testEnvironment) {
+        try {
+          await adapter.testEnvironment({
+            companyId,
+            adapterType: type,
+            config: runtimeAdapterConfig,
+          });
+        } catch {
+          // Best-effort probe: detect-model should remain non-fatal.
+        }
+      }
+
+      const detected = await detectAdapterModel(type);
+      if (detected) {
+        res.json(detected);
+        return;
+      }
+
+      const models = await refreshAdapterModels(type);
+      if (models.length > 0) {
+        const candidates = models.map((entry) => entry.id).filter((id) => id.length > 0);
+        res.json({
+          model: candidates[0]!,
+          provider: type,
+          source: "list-models",
+          candidates,
+        });
+        return;
+      }
+
+      res.json(null);
+    },
+  );
 
   router.post(
     "/companies/:companyId/adapters/:type/test-environment",

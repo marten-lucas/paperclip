@@ -19,7 +19,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Router } from "express";
+import type { Db } from "@paperclipai/db";
+import { agents } from "@paperclipai/db";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
+  listAdapterModels,
   listServerAdapters,
   findServerAdapter,
   findActiveServerAdapter,
@@ -45,6 +49,7 @@ import { loadExternalAdapterPackage, getUiParserSource, getOrExtractUiParserSour
 import { logger } from "../middleware/logger.js";
 import { assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { BUILTIN_ADAPTER_TYPES } from "../adapters/builtin-adapter-types.js";
+import { secretService } from "../services/secrets.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -187,8 +192,67 @@ function registerWithSessionManagement(adapter: ServerAdapterModule): void {
 // Router
 // ---------------------------------------------------------------------------
 
-export function adapterRoutes() {
+export function adapterRoutes(db?: Db) {
   const router = Router();
+
+  async function resolveAdapterModelsCountForView(input: {
+    adapter: ServerAdapterModule;
+    companyIds: string[];
+  }): Promise<number> {
+    const { adapter, companyIds } = input;
+    const discovered = await listAdapterModels(adapter.type);
+    if (discovered.length > 0) return discovered.length;
+
+    // Keep scope narrow: only ironclaw_http currently depends on runtime env
+    // values that users commonly store in agent adapter config.
+    if (adapter.type !== "ironclaw_http") return (adapter.models ?? []).length;
+    if (!db || companyIds.length === 0 || !adapter.testEnvironment) return (adapter.models ?? []).length;
+
+    const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+    const secretsSvc = secretService(db);
+    const rows = await db
+      .select({
+        companyId: agents.companyId,
+        adapterConfig: agents.adapterConfig,
+      })
+      .from(agents)
+      .where(and(
+        inArray(agents.companyId, companyIds),
+        eq(agents.adapterType, adapter.type),
+      ))
+      .orderBy(desc(agents.updatedAt))
+      .limit(20);
+
+    for (const row of rows) {
+      const rawConfig =
+        typeof row.adapterConfig === "object" && row.adapterConfig !== null && !Array.isArray(row.adapterConfig)
+          ? (row.adapterConfig as Record<string, unknown>)
+          : {};
+      try {
+        const normalized = await secretsSvc.normalizeAdapterConfigForPersistence(
+          row.companyId,
+          rawConfig,
+          { strictMode: strictSecretsMode },
+        );
+        const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(
+          row.companyId,
+          normalized,
+        );
+        await adapter.testEnvironment({
+          companyId: row.companyId,
+          adapterType: adapter.type,
+          config: runtimeConfig,
+        });
+      } catch {
+        continue;
+      }
+
+      const next = await listAdapterModels(adapter.type);
+      if (next.length > 0) return next.length;
+    }
+
+    return (adapter.models ?? []).length;
+  }
 
   /**
    * GET /api/adapters
@@ -202,16 +266,29 @@ export function adapterRoutes() {
     // editing company agents. Mutating adapter management routes below remain
     // instance-admin only because they affect the whole server runtime.
     assertBoardOrgAccess(_req);
+    res.set("Cache-Control", "no-store");
 
     const registeredAdapters = listServerAdapters();
     const externalRecords = new Map(
       listAdapterPlugins().map((r) => [r.type, r]),
     );
     const disabledSet = new Set(getDisabledAdapterTypes());
+    const actorCompanyIds = Array.isArray((_req as { actor?: { companyIds?: unknown } }).actor?.companyIds)
+      ? ((_req as { actor?: { companyIds?: unknown[] } }).actor?.companyIds ?? [])
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+      : [];
 
-    const result: AdapterInfo[] = registeredAdapters.map((adapter) =>
-      buildAdapterInfo(adapter, externalRecords.get(adapter.type), disabledSet),
-    ).sort((a, b) => a.type.localeCompare(b.type));
+    const resultUnsorted = await Promise.all(
+      registeredAdapters.map(async (adapter) => {
+        const info = buildAdapterInfo(adapter, externalRecords.get(adapter.type), disabledSet);
+        info.modelsCount = await resolveAdapterModelsCountForView({
+          adapter,
+          companyIds: actorCompanyIds,
+        });
+        return info;
+      }),
+    );
+    const result: AdapterInfo[] = resultUnsorted.sort((a, b) => a.type.localeCompare(b.type));
 
     res.json(result);
   });

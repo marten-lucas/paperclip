@@ -117,6 +117,56 @@ describe("ironclaw_http execute", () => {
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 20 });
   });
 
+  it("recovers when IRONCLAW_BASE_URL and IRONCLAW_API_KEY are accidentally swapped", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_swap_1",
+      model: "default",
+      output: [{ type: "message", content: "swap ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-swap-1",
+      agent: {
+        id: "agent-swap-1",
+        companyId: "company-1",
+        name: "Agent",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "token-123",
+          IRONCLAW_API_KEY: "http://127.0.0.1:3000",
+        },
+      },
+      context: {
+        input: "say hi",
+      },
+      onLog: async () => {},
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestUrl = String(calls[0]?.[0]);
+    const requestInit = (calls[0]?.[1] ?? {}) as RequestInit;
+    expect(requestUrl).toBe("http://127.0.0.1:3000/api/v1/responses");
+    expect(requestInit.headers).toMatchObject({
+      authorization: "Bearer token-123",
+    });
+    expect(result.exitCode).toBe(0);
+  });
+
   it("passes model when explicitly configured as default", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_124",
@@ -443,6 +493,8 @@ describe("ironclaw_http execute", () => {
           },
           temperature: 0.25,
           maxOutputTokens: 1234,
+          numCtx: 8192,
+          thinkingMode: "on",
           paperclipRuntimeSkills: [
             {
               key: "paperclip-converting-plans-to-tasks",
@@ -479,11 +531,15 @@ describe("ironclaw_http execute", () => {
       });
       expect(requestBody.temperature).toBe(0.25);
       expect(requestBody.max_output_tokens).toBe(1234);
+      expect(requestBody.num_ctx).toBe(8192);
+      expect(requestBody.thinking_mode).toBe("on");
       expect(requestBody.x_context.paperclip.runtimeSkills).toEqual(["paperclip-converting-plans-to-tasks"]);
       expect(requestBody.x_context.paperclip.managedInstructionsAttached).toBe(true);
       expect(requestBody.x_context.paperclip.requestControls).toMatchObject({
         temperature: 0.25,
         maxOutputTokens: 1234,
+        numCtx: 8192,
+        thinkingMode: "on",
         metadataAttached: true,
       });
       expect(requestBody.x_context.paperclip.strategicContext).toMatchObject({
@@ -493,5 +549,51 @@ describe("ironclaw_http execute", () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("does not send thinking_mode when thinkingMode is auto", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_501",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-10",
+      agent: {
+        id: "agent-10",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+        thinkingMode: "auto",
+      },
+      context: {
+        input: "hello",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.thinking_mode).toBeUndefined();
+    expect(requestBody.x_context.paperclip.requestControls.thinkingMode).toBe("auto");
+    expect(result.exitCode).toBe(0);
   });
 });

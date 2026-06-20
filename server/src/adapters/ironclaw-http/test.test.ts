@@ -43,4 +43,30 @@ describe("ironclaw_http testEnvironment", () => {
     expect(result.status).toBe("pass");
     expect(result.checks.some((check) => check.code === "ironclaw_connected")).toBe(true);
   });
+
+  it("recovers when IRONCLAW_BASE_URL and IRONCLAW_API_KEY are accidentally swapped", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      object: "list",
+      data: [{ id: "qwen3:8b" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "ironclaw_http",
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "token-123",
+          IRONCLAW_API_KEY: "http://10.12.12.102:3000",
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("pass");
+    expect(result.checks.some((check) => check.code === "ironclaw_connected")).toBe(true);
+  });
 });

@@ -83,11 +83,14 @@ vi.mock("../services/instance-settings.js", () => ({
 }));
 
 const testEnvironmentSpy = vi.fn();
+let discoveredModels: Array<{ id: string; label: string }> = [];
 
 const externalAdapter: ServerAdapterModule = {
   type: "external_test",
   execute: async () => ({ exitCode: 0, signal: null, timedOut: false }),
   testEnvironment: testEnvironmentSpy,
+  listModels: async () => discoveredModels,
+  detectModel: async () => null,
 };
 
 async function createApp() {
@@ -159,6 +162,7 @@ describe("agent test-environment route", () => {
       ],
       testedAt: new Date(0).toISOString(),
     });
+    discoveredModels = [];
     await unregisterTestAdapter("external_test");
     const { registerServerAdapter } = await import("../adapters/index.js");
     registerServerAdapter(externalAdapter);
@@ -306,6 +310,48 @@ describe("agent test-environment route", () => {
       environment: expect.objectContaining({ id: "11111111-1111-4111-8111-111111111111" }),
       lease: expect.objectContaining({ id: "lease-1" }),
       status: "failed",
+    });
+  });
+
+  it("detects model candidates from draft adapter config without a manual test click", async () => {
+    testEnvironmentSpy.mockImplementationOnce(async () => {
+      discoveredModels = [
+        { id: "qwen3:8b", label: "qwen3:8b" },
+        { id: "mistral-nemo:12b", label: "mistral-nemo:12b" },
+      ];
+      return {
+        adapterType: "external_test",
+        status: "pass",
+        checks: [
+          {
+            code: "external_test_connected",
+            level: "info",
+            message: "connected",
+          },
+        ],
+        testedAt: new Date(0).toISOString(),
+      };
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/companies/company-1/adapters/external_test/detect-model")
+      .send({
+        adapterConfig: {
+          env: {
+            IRONCLAW_BASE_URL: "http://10.12.12.102:3000",
+            IRONCLAW_API_KEY: "token-123",
+          },
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(testEnvironmentSpy).toHaveBeenCalledTimes(1);
+    expect(res.body).toEqual({
+      model: "qwen3:8b",
+      provider: "external_test",
+      source: "list-models",
+      candidates: ["qwen3:8b", "mistral-nemo:12b"],
     });
   });
 });

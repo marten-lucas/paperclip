@@ -204,6 +204,18 @@ export const agentsApi = {
     api.get<DetectedAdapterModel | null>(
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/detect-model`,
     ),
+  detectModelWithConfig: (
+    companyId: string,
+    type: string,
+    data: {
+      adapterConfig: Record<string, unknown>;
+      environmentId?: string | null;
+    },
+  ) =>
+    api.post<DetectedAdapterModel | null>(
+      `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/detect-model`,
+      data,
+    ),
   adapterModelProfiles: (companyId: string, type: string) =>
     api.get<AdapterModelProfile[]>(
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/model-profiles`,
