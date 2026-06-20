@@ -530,14 +530,12 @@ describe("ironclaw_http execute", () => {
         channel: "operations",
       });
       expect(requestBody.temperature).toBe(0.25);
-      expect(requestBody.max_output_tokens).toBe(1234);
       expect(requestBody.num_ctx).toBe(8192);
       expect(requestBody.thinking_mode).toBe("on");
       expect(requestBody.x_context.paperclip.runtimeSkills).toEqual(["paperclip-converting-plans-to-tasks"]);
       expect(requestBody.x_context.paperclip.managedInstructionsAttached).toBe(true);
       expect(requestBody.x_context.paperclip.requestControls).toMatchObject({
         temperature: 0.25,
-        maxOutputTokens: 1234,
         numCtx: 8192,
         thinkingMode: "on",
         metadataAttached: true,

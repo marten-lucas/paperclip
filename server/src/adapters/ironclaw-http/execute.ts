@@ -314,7 +314,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const configuredMetadata =
     parseConfiguredMetadata(config.metadata) ?? parseMetadataJson(config.metadataJson) ?? null;
   const temperature = asNumber(config.temperature, Number.NaN);
-  const maxOutputTokens = Math.max(0, Math.floor(asNumber(config.maxOutputTokens ?? config.max_output_tokens, 0)));
   const numCtx = Math.max(0, Math.floor(asNumber(config.numCtx ?? config.num_ctx, 0)));
   const thinkingMode = parseThinkingMode(config.thinkingMode ?? config.thinking_mode);
   const body: Record<string, unknown> = {
@@ -338,7 +337,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         managedInstructionsAttached: promptInput.hasManagedInstructions,
         requestControls: {
           temperature: Number.isFinite(temperature) ? temperature : null,
-          maxOutputTokens: maxOutputTokens > 0 ? maxOutputTokens : null,
           numCtx: numCtx > 0 ? numCtx : null,
           thinkingMode,
           metadataAttached: Boolean(configuredMetadata),
@@ -361,9 +359,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (requestModel) body.model = requestModel;
   if (Number.isFinite(temperature) && temperature >= 0 && temperature <= 2) {
     body.temperature = temperature;
-  }
-  if (maxOutputTokens > 0) {
-    body.max_output_tokens = maxOutputTokens;
   }
   if (numCtx > 0) {
     body.num_ctx = numCtx;

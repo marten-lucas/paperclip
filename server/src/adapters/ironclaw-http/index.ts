@@ -87,7 +87,6 @@ Core fields:
 - model (string, optional): default model id for requests
 - instructionsFilePath (string, optional): managed instructions file path; preferred over inline instructions
 - temperature (number, optional): response temperature, forwarded as request temperature
-- maxOutputTokens (number, optional): response output token cap, forwarded as request max_output_tokens
 - numCtx (integer, optional): Ollama context window override, forwarded as request num_ctx
 - thinkingMode ("auto" | "on" | "off", optional): thinking override, forwarded as request thinking_mode when not auto
 - metadataJson (string, optional): JSON object string forwarded as request metadata

@@ -64,32 +64,6 @@ export function IronclawHttpConfigFields({
       </Field>
 
       <Field
-        label="Max output tokens"
-        hint="Optional output token cap forwarded as max_output_tokens."
-      >
-        <DraftInput
-          value={String(getSchemaValue("maxOutputTokens", ""))}
-          onCommit={(v) => {
-            const trimmed = v.trim();
-            if (!trimmed) {
-              setSchemaValue("maxOutputTokens", undefined);
-              return;
-            }
-            const parsed = Number.parseInt(trimmed, 10);
-            if (!Number.isFinite(parsed)) return;
-            const clamped = Math.max(1, Math.min(100000, parsed));
-            setSchemaValue("maxOutputTokens", clamped);
-          }}
-          immediate
-          type="number"
-          className={inputClass}
-          placeholder="e.g. 4000"
-          min="1"
-          max="100000"
-        />
-      </Field>
-
-      <Field
         label="Ollama context window (num_ctx)"
         hint="Optional Ollama context window size for VRAM/context management."
       >

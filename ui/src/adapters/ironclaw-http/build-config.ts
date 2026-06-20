@@ -15,11 +15,6 @@ export function buildIronclawHttpConfig(
     ac.temperature = temperature;
   }
 
-  const maxOutputTokens = schemaValues.maxOutputTokens;
-  if (typeof maxOutputTokens === "number" && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
-    ac.maxOutputTokens = Math.floor(maxOutputTokens);
-  }
-
   const numCtx = schemaValues.numCtx;
   if (typeof numCtx === "number" && Number.isFinite(numCtx) && numCtx > 0) {
     ac.numCtx = Math.floor(numCtx);
