@@ -150,7 +150,7 @@ describe("ironclaw_http execute", () => {
     expect(result.errorMessage).toContain("1s");
   });
 
-  it("reads URL/token from env bindings, omits non-default model, and stores response id", async () => {
+  it("reads URL/token from env bindings, forwards configured model, and stores response id", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_123",
       model: "qwen3:8b",
@@ -199,7 +199,7 @@ describe("ironclaw_http execute", () => {
     expect(requestInit.method).toBe("POST");
 
     const requestBody = JSON.parse(String(requestInit.body));
-    expect(requestBody.model).toBeUndefined();
+    expect(requestBody.model).toBe("qwen3:8b");
     expect(requestBody.input).toBe("say hi");
     expect(requestBody.previous_response_id).toBe(seededPreviousResponseId("agent-2"));
     expect(requestBody.x_context).toMatchObject({

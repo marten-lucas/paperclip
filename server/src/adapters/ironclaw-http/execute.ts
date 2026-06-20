@@ -288,7 +288,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const url = resolveBaseUrl(resolvedUrl);
   const authToken = resolvedToken;
   const requestedModel = asString(config.model, "").trim();
-  const requestModel = requestedModel.toLowerCase() === "default" ? "default" : "";
+  const requestModel = requestedModel;
   const rawTimeoutSec = asNumber(config.timeoutSec, 120);
   const timeoutSec = Number.isFinite(rawTimeoutSec)
     ? (rawTimeoutSec <= 0 ? 0 : Math.min(3600, rawTimeoutSec))
@@ -357,8 +357,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (configuredMetadata) {
     body.metadata = configuredMetadata;
   }
-  // Ironclaw currently supports the implicit default model only.
-  // Send "model" only when the caller explicitly requests "default".
+  // Forward an explicit model when configured. Omitting the field keeps
+  // Ironclaw on its server-side default selection.
   if (requestModel) body.model = requestModel;
   if (Number.isFinite(temperature) && temperature >= 0 && temperature <= 2) {
     body.temperature = temperature;
