@@ -47,6 +47,109 @@ describe("ironclaw_http execute", () => {
     expect(result.errorCode).toBe("ironclaw_config_missing");
   });
 
+  it("treats timeoutSec=0 as no timeout", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      return new Response(JSON.stringify({
+        id: "resp_timeout_0",
+        model: "default",
+        output: [{ type: "message", content: "ok" }],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-timeout-0",
+      agent: {
+        id: "agent-timeout-0",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+        timeoutSec: 0,
+      },
+      context: {
+        input: "hello",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("times out when timeoutSec is positive", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", ((handler: (...args: any[]) => void) => {
+      handler();
+      return realSetTimeout(() => {}, 0);
+    }) as unknown as typeof setTimeout);
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      return new Response(JSON.stringify({
+        id: "resp_should_not_happen",
+        model: "default",
+        output: [{ type: "message", content: "ok" }],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-timeout-1",
+      agent: {
+        id: "agent-timeout-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+        timeoutSec: 1,
+      },
+      context: {
+        input: "hello",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.timedOut).toBe(true);
+    expect(result.errorCode).toBe("timeout");
+    expect(result.errorMessage).toContain("1s");
+  });
+
   it("reads URL/token from env bindings, omits non-default model, and stores response id", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_123",

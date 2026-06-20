@@ -289,7 +289,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const authToken = resolvedToken;
   const requestedModel = asString(config.model, "").trim();
   const requestModel = requestedModel.toLowerCase() === "default" ? "default" : "";
-  const timeoutSec = Math.max(1, Math.min(3600, asNumber(config.timeoutSec, 120)));
+  const rawTimeoutSec = asNumber(config.timeoutSec, 120);
+  const timeoutSec = Number.isFinite(rawTimeoutSec)
+    ? (rawTimeoutSec <= 0 ? 0 : Math.min(3600, rawTimeoutSec))
+    : 120;
 
   if (!url || !authToken) {
     return {
@@ -380,7 +383,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
+  const timer = timeoutSec > 0
+    ? setTimeout(() => controller.abort(), timeoutSec * 1000)
+    : null;
 
   if (ctx.onMeta) {
     await ctx.onMeta({
@@ -473,6 +478,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       errorMessage: message,
     };
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
