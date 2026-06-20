@@ -492,7 +492,6 @@ describe("ironclaw_http execute", () => {
             channel: "operations",
           },
           temperature: 0.25,
-          maxOutputTokens: 1234,
           numCtx: 8192,
           thinkingMode: "on",
           paperclipRuntimeSkills: [
