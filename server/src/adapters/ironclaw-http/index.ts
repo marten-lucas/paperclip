@@ -43,6 +43,10 @@ const sessionManagement =
     },
   };
 
+// Prime model cache on startup so adapter listings and model pickers can show
+// discovered models without requiring a manual "Test connection" click first.
+void fetchAndCacheIronclawModels();
+
 export const ironclawHttpAdapter: ServerAdapterModule = {
   type: "ironclaw_http",
   execute,
