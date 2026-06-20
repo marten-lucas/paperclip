@@ -8,6 +8,7 @@ import { resetOpenCodeModelsCacheForTests } from "@paperclipai/adapter-opencode-
 import { listAdapterModels, listServerAdapters, refreshAdapterModels } from "../adapters/index.js";
 import { resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
+import { resetIronclawHttpModelsForTests } from "../adapters/ironclaw-http/models-cache.js";
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
@@ -23,10 +24,13 @@ describe("adapter model listing", () => {
     delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    delete process.env.IRONCLAW_API_KEY;
+    delete process.env.IRONCLAW_BASE_URL;
     delete process.env.PAPERCLIP_OPENCODE_COMMAND;
     resetClaudeModelsCacheForTests();
     resetCodexModelsCacheForTests();
     resetCursorModelsCacheForTests();
+    resetIronclawHttpModelsForTests();
     setCursorModelsRunnerForTests(null);
     resetOpenCodeModelsCacheForTests();
     vi.restoreAllMocks();
@@ -178,6 +182,71 @@ describe("adapter model listing", () => {
 
     const models = await listAdapterModels("codex_local");
     expect(models).toEqual(codexFallbackModels);
+  });
+
+  it("returns an empty ironclaw list when global env credentials are unavailable", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const models = await listAdapterModels("ironclaw_http");
+
+    expect(models).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("loads ironclaw models dynamically from process env and caches them", async () => {
+    process.env.IRONCLAW_BASE_URL = "http://10.12.12.102:3000";
+    process.env.IRONCLAW_API_KEY = "token-test";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: "qwen3-vl:32b" },
+          { id: "qwen2.5vl:7b" },
+        ],
+      }),
+    } as Response);
+
+    const first = await listAdapterModels("ironclaw_http");
+    const second = await listAdapterModels("ironclaw_http");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://10.12.12.102:3000/v1/models",
+      expect.objectContaining({
+        method: "GET",
+        headers: { authorization: "Bearer token-test" },
+      }),
+    );
+    expect(first).toEqual(second);
+    expect(first).toEqual([
+      { id: "qwen3-vl:32b", label: "qwen3-vl:32b" },
+      { id: "qwen2.5vl:7b", label: "qwen2.5vl:7b" },
+    ]);
+  });
+
+  it("refreshes cached ironclaw models on demand", async () => {
+    process.env.IRONCLAW_BASE_URL = "http://10.12.12.102:3000";
+    process.env.IRONCLAW_API_KEY = "token-test";
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: "qwen3-vl:32b" }],
+        }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: "qwen2.5vl:7b" }],
+        }),
+      } as Response);
+
+    const initial = [...await listAdapterModels("ironclaw_http")];
+    const refreshed = [...await refreshAdapterModels("ironclaw_http")];
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(initial).toEqual([{ id: "qwen3-vl:32b", label: "qwen3-vl:32b" }]);
+    expect(refreshed).toEqual([{ id: "qwen2.5vl:7b", label: "qwen2.5vl:7b" }]);
   });
 
 

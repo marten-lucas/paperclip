@@ -3,7 +3,7 @@ import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 import { testEnvironment } from "./test.js";
 import { getConfigSchema } from "./config-schema.js";
-import { ironclawHttpModels } from "./models-cache.js";
+import { ironclawHttpModels, fetchAndCacheIronclawModels } from "./models-cache.js";
 import { listIronclawSkills, syncIronclawSkills } from "./skills.js";
 
 function readNonEmptyString(value: unknown): string | null {
@@ -56,8 +56,11 @@ export const ironclawHttpAdapter: ServerAdapterModule = {
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: false,
   models: ironclawHttpModels,
-  listModels: async () => ironclawHttpModels,
-  refreshModels: async () => ironclawHttpModels,
+  listModels: async () => {
+    if (ironclawHttpModels.length === 0) await fetchAndCacheIronclawModels();
+    return ironclawHttpModels;
+  },
+  refreshModels: fetchAndCacheIronclawModels,
   getConfigSchema,
   agentConfigurationDoc: `# ironclaw_http agent configuration
 
