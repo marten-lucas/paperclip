@@ -65,6 +65,17 @@ export const ironclawHttpAdapter: ServerAdapterModule = {
     return ironclawHttpModels;
   },
   refreshModels: fetchAndCacheIronclawModels,
+  detectModel: async () => {
+    if (ironclawHttpModels.length === 0) await fetchAndCacheIronclawModels();
+    if (ironclawHttpModels.length === 0) return null;
+    const candidates = ironclawHttpModels.map((entry) => entry.id).filter((id) => id.length > 0);
+    return {
+      model: candidates[0]!,
+      provider: "ironclaw_http",
+      source: "IRONCLAW_BASE_URL:/v1/models",
+      candidates,
+    };
+  },
   getConfigSchema,
   agentConfigurationDoc: `# ironclaw_http agent configuration
 
