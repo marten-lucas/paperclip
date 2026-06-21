@@ -64,6 +64,11 @@ function buildConversationLabel(agentLabel: string): string {
   return `${agentLabel} heartbeat`;
 }
 
+function buildConversationTitle(agentLabel: string): string {
+  if (/\bceo\b/i.test(agentLabel)) return "CEO";
+  return agentLabel;
+}
+
 function truncateChars(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n\n...[truncated by Paperclip]`;
@@ -347,6 +352,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
       conversation: {
         label: buildConversationLabel(agentLabel),
+        title: buildConversationTitle(agentLabel),
         kind: "paperclip_heartbeat",
       },
     },

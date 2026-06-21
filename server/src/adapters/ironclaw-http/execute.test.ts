@@ -211,6 +211,7 @@ describe("ironclaw_http execute", () => {
       },
       conversation: {
         label: "Agent heartbeat",
+        title: "Agent",
         kind: "paperclip_heartbeat",
       },
     });
@@ -453,6 +454,7 @@ describe("ironclaw_http execute", () => {
     const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
     expect(requestBody.input).toBe("CEO heartbeat task:\n\nExecute the assigned task.");
     expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
+    expect(requestBody.x_context?.conversation?.title).toBe("CEO");
     expect(requestBody.x_context?.paperclip?.wakeSource).toBeNull();
     expect(result.exitCode).toBe(0);
   });
@@ -546,6 +548,7 @@ describe("ironclaw_http execute", () => {
     const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
     expect(requestBody.previous_response_id).toBeUndefined();
     expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
+    expect(requestBody.x_context?.conversation?.title).toBe("CEO");
     expect(result.exitCode).toBe(0);
   });
 
