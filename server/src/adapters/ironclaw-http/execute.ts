@@ -57,13 +57,56 @@ function toUuidHex(value: string): string {
   return createHash("sha256").update(trimmed).digest("hex").slice(0, 32);
 }
 
-function buildSeededPreviousResponseId(agentId: string): string {
-  const threadHex = toUuidHex(`paperclip-agent-thread:${agentId}`);
+// Build a deterministic seed previous_response_id. When an issueId is provided
+// the seed is scoped to the task so different issues get isolated threads.
+// Without an issueId the seed falls back to the agent level, which is used only
+// for runs that have no task context (pure timer/manual wakes).
+function buildSeededPreviousResponseId(agentId: string, issueId?: string): string {
+  const scopeKey = issueId
+    ? `paperclip-task-thread:${agentId}:${issueId}`
+    : `paperclip-agent-thread:${agentId}`;
+  const threadHex = toUuidHex(scopeKey);
+  const responseScopeKey = issueId
+    ? `paperclip-task-seed-response:${agentId}:${issueId}`
+    : `paperclip-agent-seed-response:${agentId}`;
   const responseHex = createHash("sha256")
-    .update(`paperclip-agent-seed-response:${agentId}`)
+    .update(responseScopeKey)
     .digest("hex")
     .slice(0, 32);
   return `resp_${responseHex}${threadHex}`;
+}
+
+type FreshSessionDecision = {
+  forceFresh: boolean;
+  reason:
+    | "force_fresh_session_requested"
+    | "retry_of_failed_run_no_prior_session"
+    | "default_chained_session";
+};
+
+// Determine whether this adapter invocation should start a completely fresh
+// Ironclaw conversation rather than continuing the prior one.
+//
+// Rules (evaluated in priority order):
+// 1. Explicit `forceFreshSession` in context always wins.
+// 2. When a run is a retry of a failed/timed-out predecessor AND there is no
+//    existing live session to continue from, force fresh so the retry does not
+//    inherit a contaminated or partially-completed thread.
+function decideFreshSession(
+  ctx: AdapterExecutionContext,
+  previousResponseId: string,
+): FreshSessionDecision {
+  if (ctx.context.forceFreshSession === true) {
+    return { forceFresh: true, reason: "force_fresh_session_requested" };
+  }
+
+  const retryReason = asString(ctx.context.retryReason, "").trim();
+  const retryOfRunId = asString(ctx.context.retryOfRunId, "").trim();
+  if ((retryReason || retryOfRunId) && !previousResponseId) {
+    return { forceFresh: true, reason: "retry_of_failed_run_no_prior_session" };
+  }
+
+  return { forceFresh: false, reason: "default_chained_session" };
 }
 
 function buildConversationLabel(agentLabel: string): string {
@@ -395,7 +438,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const wakeTriggerDetail = asString(ctx.context.wakeTriggerDetail, "").trim();
   const taskKey = asString(ctx.context.taskKey, "").trim() || ctx.runtime.taskKey || "";
   const issueId = asString(ctx.context.issueId, "").trim();
-  const forceFreshSession = ctx.context.forceFreshSession === true;
   const strategicContext = parseObject(ctx.context.paperclipStrategicContext);
   const configuredMetadata =
     parseConfiguredMetadata(config.metadata) ?? parseMetadataJson(config.metadataJson) ?? null;
@@ -406,8 +448,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ctx.runtime.sessionParams && typeof ctx.runtime.sessionParams === "object"
       ? asString((ctx.runtime.sessionParams as Record<string, unknown>).responseId, "")
       : "";
-  const seededPreviousResponseId = buildSeededPreviousResponseId(ctx.agent.id);
-  const effectivePreviousResponseId = forceFreshSession
+  // Task-scoped seed: isolate threads per issue so distinct tasks never share
+  // the same Ironclaw conversation history.
+  const seededPreviousResponseId = buildSeededPreviousResponseId(ctx.agent.id, issueId || undefined);
+  const freshSessionDecision = decideFreshSession(ctx, previousResponseId);
+  const effectivePreviousResponseId = freshSessionDecision.forceFresh
     ? ""
     : (previousResponseId || seededPreviousResponseId);
   const body: Record<string, unknown> = {
@@ -436,6 +481,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         managedInstructionsAttached: promptInput.hasManagedInstructions,
         continuationPolicy: {
           continuationMode: effectivePreviousResponseId ? "chained" : "fresh",
+          freshSessionReason: freshSessionDecision.reason,
+          conversationStrategy: freshSessionDecision.forceFresh
+            ? (freshSessionDecision.reason === "retry_of_failed_run_no_prior_session"
+              ? "retry_fresh_session"
+              : "fresh_session")
+            : previousResponseId
+              ? "session_previous_response_id"
+              : (issueId ? "task_scoped_seed" : "deterministic_agent_seed"),
           lowSignalDetected: false,
           retryRecommendation: "none",
         },
@@ -494,11 +547,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           token: asString(env.IRONCLAW_API_KEY, "").trim().length > 0 ? "env.IRONCLAW_API_KEY" : "adapterConfig.authToken",
         },
         conversation: {
-          strategy: forceFreshSession
-            ? "fresh_session"
+          strategy: freshSessionDecision.forceFresh
+            ? (freshSessionDecision.reason === "retry_of_failed_run_no_prior_session"
+              ? "retry_fresh_session"
+              : "fresh_session")
             : previousResponseId
               ? "session_previous_response_id"
-              : "deterministic_agent_seed",
+              : (issueId ? "task_scoped_seed" : "deterministic_agent_seed"),
           previousResponseId: effectivePreviousResponseId || null,
         },
         managedInstructionsAttached: promptInput.hasManagedInstructions,

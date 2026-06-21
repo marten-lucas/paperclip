@@ -5,13 +5,19 @@ import os from "node:os";
 import path from "node:path";
 import { execute } from "./execute.js";
 
-function seededPreviousResponseId(agentId: string): string {
+function seededPreviousResponseId(agentId: string, issueId?: string): string {
+  const scopeKey = issueId
+    ? `paperclip-task-thread:${agentId}:${issueId}`
+    : `paperclip-agent-thread:${agentId}`;
   const threadHex = createHash("sha256")
-    .update(`paperclip-agent-thread:${agentId}`)
+    .update(scopeKey)
     .digest("hex")
     .slice(0, 32);
+  const responseScopeKey = issueId
+    ? `paperclip-task-seed-response:${agentId}:${issueId}`
+    : `paperclip-agent-seed-response:${agentId}`;
   const responseHex = createHash("sha256")
-    .update(`paperclip-agent-seed-response:${agentId}`)
+    .update(responseScopeKey)
     .digest("hex")
     .slice(0, 32);
   return `resp_${responseHex}${threadHex}`;
@@ -834,6 +840,109 @@ describe("ironclaw_http execute", () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("uses task-scoped seed for previous_response_id when issueId is present", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_601",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const agentId = "agent-task-seed";
+    const issueId = "issue-abc-123";
+
+    await execute({
+      runId: "run-task-seed",
+      agent: {
+        id: agentId,
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        issueId,
+        input: "do the task",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    // Must use task-scoped seed, not agent-level seed
+    expect(requestBody.previous_response_id).toBe(seededPreviousResponseId(agentId, issueId));
+    expect(requestBody.previous_response_id).not.toBe(seededPreviousResponseId(agentId));
+    // Strategy label reflects task-scoped seed
+    expect(requestBody.x_context.paperclip.continuationPolicy.conversationStrategy).toBe("task_scoped_seed");
+  });
+
+  it("forces fresh session when retryReason is set and no prior session exists", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_602",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await execute({
+      runId: "run-retry-fresh",
+      agent: {
+        id: "agent-retry",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null, // no prior session
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        issueId: "issue-retry",
+        retryReason: "issue_continuation_needed",
+        retryOfRunId: "a38ec39c-54c9-4bd3-811d-2de9834d1bd1",
+        input: "retry the task",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    // Must not send previous_response_id — fresh thread
+    expect(requestBody.previous_response_id).toBeUndefined();
+    expect(requestBody.x_context.paperclip.continuationPolicy.conversationStrategy).toBe("retry_fresh_session");
+    expect(requestBody.x_context.paperclip.continuationPolicy.freshSessionReason).toBe(
+      "retry_of_failed_run_no_prior_session",
+    );
+    expect(requestBody.x_context.paperclip.continuationPolicy.continuationMode).toBe("fresh");
   });
 
   it("does not send thinking_mode when thinkingMode is auto", async () => {
