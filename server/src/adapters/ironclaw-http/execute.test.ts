@@ -201,6 +201,7 @@ describe("ironclaw_http execute", () => {
     const requestBody = JSON.parse(String(requestInit.body));
     expect(requestBody.model).toBe("qwen3:8b");
     expect(requestBody.input).toBe("say hi");
+    expect(requestBody.stream).toBe(false);
     expect(requestBody.previous_response_id).toBe(seededPreviousResponseId("agent-2"));
     expect(requestBody.x_context).toMatchObject({
       paperclip: {
@@ -362,8 +363,172 @@ describe("ironclaw_http execute", () => {
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
     const requestInit = (calls[0]?.[1] ?? {}) as RequestInit;
     const requestBody = JSON.parse(String(requestInit.body));
+    expect(requestBody.stream).toBe(false);
     expect(requestBody.previous_response_id).toBe("resp_existing");
     expect(result.exitCode).toBe(0);
+  });
+
+  it("fails when Ironclaw returns response status=failed", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_failed_1",
+      model: "qwen3:8b",
+      status: "failed",
+      error: { message: "backend stream failed" },
+      output: [],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-failed-status-1",
+      agent: {
+        id: "agent-failed-status-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: { responseId: "resp_existing" },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        input: "continue",
+      },
+      onLog: async () => {},
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("ironclaw_response_failed");
+    expect(result.errorMessage).toContain("backend stream failed");
+    expect(result.resultJson).toMatchObject({
+      id: "resp_failed_1",
+      status: "failed",
+    });
+  });
+
+  it("warns when Ironclaw returns a suspiciously short non-stream response", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_short_warn_1",
+      model: "qwen3:8b",
+      status: "completed",
+      output: [{ type: "message", content: "Based" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+    const onLog = vi.fn(async () => {});
+
+    const result = await execute({
+      runId: "run-short-warn-1",
+      agent: {
+        id: "agent-short-warn-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        input: "continue",
+      },
+      onLog,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(onLog).toHaveBeenCalledWith("stdout", "Based\n");
+    expect(onLog).toHaveBeenCalledWith(
+      "stderr",
+      expect.stringContaining("Warning: low_signal_short_text response from Ironclaw"),
+    );
+    expect(result.resultJson).toMatchObject({
+      paperclip_response_quality: {
+        classification: "low_signal_short_text",
+        low_signal_detected: true,
+        retry_recommendation: "fresh_session",
+      },
+    });
+  });
+
+  it("does not warn for a normal-length response", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_no_warn_1",
+      model: "qwen3:8b",
+      status: "completed",
+      output: [{ type: "message", content: "This is a normal complete answer from Ironclaw." }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+    const onLog = vi.fn(async () => {});
+
+    const result = await execute({
+      runId: "run-no-warn-1",
+      agent: {
+        id: "agent-no-warn-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        input: "continue",
+      },
+      onLog,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(onLog).toHaveBeenCalledWith("stdout", "This is a normal complete answer from Ironclaw.\n");
+    expect(result.resultJson).toMatchObject({
+      paperclip_response_quality: {
+        classification: "normal_text",
+        low_signal_detected: false,
+        retry_recommendation: "none",
+      },
+    });
+    expect(onLog).not.toHaveBeenCalledWith(
+      "stderr",
+      expect.stringContaining("Warning: low_signal_short_text response from Ironclaw"),
+    );
   });
 
   it("prefers paperclipTaskMarkdown over fallback input and prefixes agent label", async () => {
@@ -626,10 +791,11 @@ describe("ironclaw_http execute", () => {
       const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
       expect(requestBody.input).not.toContain("Managed agent instructions");
       expect(requestBody.input).not.toContain("Always decompose approved plans.");
+      expect(requestBody.input).not.toContain("Paperclip runtime skills");
+      expect(requestBody.input).not.toContain("Skill: paperclip-converting-plans-to-tasks");
+      expect(requestBody.input).not.toContain("Use blockedByIssueIds for real blockers.");
       expect(requestBody.instructions).toContain("Always decompose approved plans.");
-      expect(requestBody.input).toContain("Paperclip runtime skills");
-      expect(requestBody.input).toContain("Skill: paperclip-converting-plans-to-tasks");
-      expect(requestBody.input).toContain("Use blockedByIssueIds for real blockers.");
+      expect(requestBody.instructions).toContain("Execution contract:");
       expect(requestBody.metadata).toMatchObject({
         source: "nextcloud-talk",
         channel: "operations",
@@ -638,6 +804,22 @@ describe("ironclaw_http execute", () => {
       expect(requestBody.num_ctx).toBe(8192);
       expect(requestBody.thinking_mode).toBe("on");
       expect(requestBody.x_context.paperclip.runtimeSkills).toEqual(["paperclip-converting-plans-to-tasks"]);
+      expect(requestBody.x_context.paperclip.runtimeSkillSummaries).toEqual([
+        {
+          key: "paperclip-converting-plans-to-tasks",
+          summary: "Use blockedByIssueIds for real blockers.",
+        },
+      ]);
+      expect(requestBody.x_context.paperclip.runtimeSkillSelection).toMatchObject({
+        selectedCount: 1,
+        summaryCount: 1,
+        rationale: "selected_from_paperclip_runtime_skills",
+      });
+      expect(requestBody.x_context.paperclip.continuationPolicy).toMatchObject({
+        continuationMode: "chained",
+        lowSignalDetected: false,
+        retryRecommendation: "none",
+      });
       expect(requestBody.x_context.paperclip.managedInstructionsAttached).toBe(true);
       expect(requestBody.x_context.paperclip.requestControls).toMatchObject({
         temperature: 0.25,

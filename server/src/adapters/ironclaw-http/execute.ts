@@ -6,7 +6,9 @@ import { resolvePaperclipDesiredSkillNames } from "@paperclipai/adapter-utils/se
 import { asNumber, asString, parseObject } from "../utils.js";
 const MAX_INSTRUCTIONS_CHARS = 12_000;
 const MAX_SKILLS_IN_PROMPT = 6;
-const MAX_SKILL_CHARS = 4_000;
+const MAX_RUNTIME_SKILL_SUMMARY_CHARS = 240;
+
+type ResponseQualityClassification = "empty_text" | "low_signal_short_text" | "normal_text";
 
 type IronclawUsage = {
   input_tokens?: number;
@@ -21,6 +23,11 @@ type RuntimeSkillEntry = {
   source: string;
   sourceStatus: "available" | "missing";
   required: boolean;
+};
+
+type RuntimeSkillSummary = {
+  key: string;
+  summary: string;
 };
 
 function isHttpUrl(value: string): boolean {
@@ -120,27 +127,45 @@ async function readManagedInstructions(
 async function readSelectedSkillMarkdown(
   config: Record<string, unknown>,
   onLog: AdapterExecutionContext["onLog"],
-): Promise<{ selectedKeys: string[]; sections: string[] }> {
+): Promise<{ selectedKeys: string[]; summaries: RuntimeSkillSummary[]; selectionRationale: string }> {
   const entries = parseRuntimeSkillEntries(config);
-  if (entries.length === 0) return { selectedKeys: [], sections: [] };
+  if (entries.length === 0) {
+    return {
+      selectedKeys: [],
+      summaries: [],
+      selectionRationale: "no_runtime_skills_configured",
+    };
+  }
 
   const desired = new Set(resolvePaperclipDesiredSkillNames(config, entries));
   const selected = entries
     .filter((entry) => desired.has(entry.key) && entry.sourceStatus !== "missing")
     .slice(0, MAX_SKILLS_IN_PROMPT);
-  if (selected.length === 0) return { selectedKeys: [], sections: [] };
+  if (selected.length === 0) {
+    return {
+      selectedKeys: [],
+      summaries: [],
+      selectionRationale: "desired_skills_missing_or_unavailable",
+    };
+  }
 
-  const sections: string[] = [];
+  const summaries: RuntimeSkillSummary[] = [];
   for (const entry of selected) {
     const markdownPath = path.join(entry.source, "SKILL.md");
     try {
       const markdown = (await fs.readFile(markdownPath, "utf8")).trim();
       if (!markdown) continue;
-      sections.push([
-        `### Skill: ${entry.key}`,
-        "",
-        truncateChars(markdown, MAX_SKILL_CHARS),
-      ].join("\n"));
+
+      const summaryLine = markdown
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("---") && !line.startsWith("name:") && !line.startsWith("description:"));
+      if (!summaryLine) continue;
+
+      summaries.push({
+        key: entry.key,
+        summary: truncateChars(summaryLine, MAX_RUNTIME_SKILL_SUMMARY_CHARS),
+      });
     } catch (error) {
       await onLog(
         "stderr",
@@ -151,30 +176,69 @@ async function readSelectedSkillMarkdown(
 
   return {
     selectedKeys: selected.map((entry) => entry.key),
-    sections,
+    summaries,
+    selectionRationale: "selected_from_paperclip_runtime_skills",
+  };
+}
+
+function buildInstructionLayer(managedInstructions: string | null): string | null {
+  const executionContract = [
+    "Execution contract:",
+    "- Act on the current heartbeat task and provide a concrete, actionable response.",
+    "- If work is blocked, state the blocker and the exact next action.",
+    "- Avoid one-token acknowledgements; provide useful output.",
+  ].join("\n");
+
+  if (!managedInstructions) {
+    return truncateChars(executionContract, MAX_INSTRUCTIONS_CHARS);
+  }
+
+  return truncateChars(`${managedInstructions}\n\n${executionContract}`, MAX_INSTRUCTIONS_CHARS);
+}
+
+function buildTaskInputLayer(ctx: AdapterExecutionContext): string {
+  return extractMessage(ctx);
+}
+
+function buildRuntimeSkillContext(skillBundle: {
+  selectedKeys: string[];
+  summaries: RuntimeSkillSummary[];
+  selectionRationale: string;
+}): {
+  runtimeSkills: string[];
+  runtimeSkillSummaries: RuntimeSkillSummary[];
+  runtimeSkillSelection: { selectedCount: number; summaryCount: number; rationale: string };
+} {
+  return {
+    runtimeSkills: skillBundle.selectedKeys,
+    runtimeSkillSummaries: skillBundle.summaries,
+    runtimeSkillSelection: {
+      selectedCount: skillBundle.selectedKeys.length,
+      summaryCount: skillBundle.summaries.length,
+      rationale: skillBundle.selectionRationale,
+    },
   };
 }
 
 async function buildPromptInput(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-): Promise<{ prompt: string; attachedSkills: string[]; hasManagedInstructions: boolean; instructions: string | null }> {
-  const basePrompt = extractMessage(ctx);
+): Promise<{
+  taskInput: string;
+  instructions: string | null;
+  hasManagedInstructions: boolean;
+  runtimeSkillMeta: ReturnType<typeof buildRuntimeSkillContext>;
+}> {
   const [instructions, skillBundle] = await Promise.all([
     readManagedInstructions(config, ctx.onLog),
     readSelectedSkillMarkdown(config, ctx.onLog),
   ]);
 
-  const sections = [basePrompt];
-  if (skillBundle.sections.length > 0) {
-    sections.push(["Paperclip runtime skills:", ...skillBundle.sections].join("\n\n"));
-  }
-
   return {
-    prompt: sections.join("\n\n---\n\n"),
-    attachedSkills: skillBundle.selectedKeys,
+    taskInput: buildTaskInputLayer(ctx),
     hasManagedInstructions: Boolean(instructions.content),
-    instructions: instructions.content,
+    instructions: buildInstructionLayer(instructions.content),
+    runtimeSkillMeta: buildRuntimeSkillContext(skillBundle),
   };
 }
 
@@ -264,6 +328,20 @@ function extractOutputText(output: unknown): string {
   return chunks.join("\n");
 }
 
+function classifyResponseText(text: string): ResponseQualityClassification {
+  const normalized = text.trim();
+  if (!normalized) return "empty_text";
+
+  const lowSignalTokens = new Set(["based"]);
+  if (lowSignalTokens.has(normalized.toLowerCase())) {
+    return "low_signal_short_text";
+  }
+
+  if (normalized.length > 16) return "normal_text";
+  const tokenCount = normalized.split(/\s+/).filter(Boolean).length;
+  return tokenCount <= 3 ? "low_signal_short_text" : "normal_text";
+}
+
 function toUsage(usage: unknown): AdapterExecutionResult["usage"] | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const typedUsage = usage as IronclawUsage;
@@ -310,7 +388,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const promptInput = await buildPromptInput(ctx, config);
-  const input = promptInput.prompt;
+  const input = promptInput.taskInput;
   const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
   const wakeSource = asString(ctx.context.wakeSource, "").trim();
   const wakeReason = asString(ctx.context.wakeReason, "").trim();
@@ -324,8 +402,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const temperature = asNumber(config.temperature, Number.NaN);
   const numCtx = Math.max(0, Math.floor(asNumber(config.numCtx ?? config.num_ctx, 0)));
   const thinkingMode = parseThinkingMode(config.thinkingMode ?? config.thinking_mode);
+  const previousResponseId =
+    ctx.runtime.sessionParams && typeof ctx.runtime.sessionParams === "object"
+      ? asString((ctx.runtime.sessionParams as Record<string, unknown>).responseId, "")
+      : "";
+  const seededPreviousResponseId = buildSeededPreviousResponseId(ctx.agent.id);
+  const effectivePreviousResponseId = forceFreshSession
+    ? ""
+    : (previousResponseId || seededPreviousResponseId);
   const body: Record<string, unknown> = {
     input,
+    // Force non-streaming mode so the adapter always receives a single
+    // JSON payload and can reliably persist previous_response_id chaining.
+    stream: false,
     // Ironclaw extension field. Used to persist Paperclip-side invocation
     // identity in gateway conversation metadata.
     x_context: {
@@ -341,8 +430,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         taskKey: taskKey || null,
         issueId: issueId || null,
         strategicContext: Object.keys(strategicContext).length > 0 ? strategicContext : null,
-        runtimeSkills: promptInput.attachedSkills,
+        runtimeSkills: promptInput.runtimeSkillMeta.runtimeSkills,
+        runtimeSkillSummaries: promptInput.runtimeSkillMeta.runtimeSkillSummaries,
+        runtimeSkillSelection: promptInput.runtimeSkillMeta.runtimeSkillSelection,
         managedInstructionsAttached: promptInput.hasManagedInstructions,
+        continuationPolicy: {
+          continuationMode: effectivePreviousResponseId ? "chained" : "fresh",
+          lowSignalDetected: false,
+          retryRecommendation: "none",
+        },
         requestControls: {
           temperature: Number.isFinite(temperature) ? temperature : null,
           numCtx: numCtx > 0 ? numCtx : null,
@@ -376,14 +472,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     body.thinking_mode = thinkingMode;
   }
 
-  const previousResponseId =
-    ctx.runtime.sessionParams && typeof ctx.runtime.sessionParams === "object"
-      ? asString((ctx.runtime.sessionParams as Record<string, unknown>).responseId, "")
-      : "";
-  const seededPreviousResponseId = buildSeededPreviousResponseId(ctx.agent.id);
-  const effectivePreviousResponseId = forceFreshSession
-    ? ""
-    : (previousResponseId || seededPreviousResponseId);
   if (effectivePreviousResponseId) {
     body.previous_response_id = effectivePreviousResponseId;
   }
@@ -414,7 +502,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           previousResponseId: effectivePreviousResponseId || null,
         },
         managedInstructionsAttached: promptInput.hasManagedInstructions,
-        runtimeSkillsAttached: promptInput.attachedSkills,
+        runtimeSkillsAttached: promptInput.runtimeSkillMeta.runtimeSkills,
       },
       prompt: input,
       promptMetrics: {
@@ -446,9 +534,48 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const responseStatus = asString(payload.status, "").trim().toLowerCase();
+    if (responseStatus === "failed") {
+      const responseError = parseObject(payload.error);
+      const responseErrorMessage = asString(responseError.message, "").trim();
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "ironclaw_response_failed",
+        errorMessage: responseErrorMessage || "Ironclaw response status=failed",
+        resultJson: payload,
+      };
+    }
+
     const text = extractOutputText(payload.output) || asString(payload.output_text, "");
+    const responseQuality = classifyResponseText(text);
+    const lowSignalDetected = responseQuality === "low_signal_short_text";
+    const continuationMode = effectivePreviousResponseId ? "chained" : "fresh";
+    const retryRecommendation = lowSignalDetected ? "fresh_session" : "none";
+
+    payload.paperclip_response_quality = {
+      classification: responseQuality,
+      textLength: text.trim().length,
+      continuation_mode: continuationMode,
+      low_signal_detected: lowSignalDetected,
+      retry_recommendation: retryRecommendation,
+    };
+
     if (text) {
       await ctx.onLog("stdout", `${text}\n`);
+    }
+
+    if (responseQuality === "low_signal_short_text") {
+      await ctx.onLog(
+        "stderr",
+        `[paperclip] Warning: low_signal_short_text response from Ironclaw (${JSON.stringify(text.trim())}); continuation_mode=${continuationMode}, retry_recommendation=${retryRecommendation}.\n`,
+      );
+    } else if (responseQuality === "empty_text") {
+      await ctx.onLog(
+        "stderr",
+        `[paperclip] Warning: empty_text response from Ironclaw; continuation_mode=${continuationMode}.\n`,
+      );
     }
 
     const responseId = asString(payload.id, "").trim();
