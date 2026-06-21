@@ -683,6 +683,55 @@ describe("ironclaw_http execute", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it("synthesizes stronger manual wake input for generic on-demand context without issue/task", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_303",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await execute({
+      runId: "run-7b",
+      agent: {
+        id: "agent-7b",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        wakeSource: "on_demand",
+        wakeTriggerDetail: "manual",
+        manualTaskMarkdown:
+          "Manual wake task context:\n- Trigger: on_demand/manual\n- Objective: Continue the active assignment and report status/progress.",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.input).toContain("Execution focus:");
+    expect(requestBody.input).toContain("Do not switch to unrelated generic helpdesk workflows.");
+    expect(requestBody.input).toContain("request the exact missing identifier (issueId/taskKey)");
+  });
+
   it("omits previous_response_id when forceFreshSession is requested", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_400",
@@ -728,6 +777,61 @@ describe("ironclaw_http execute", () => {
     expect(requestBody.previous_response_id).toBeUndefined();
     expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
     expect(requestBody.x_context?.conversation?.title).toBe("CEO");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("forces fresh session for on-demand manual wake without issueId", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_401",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-8b",
+      agent: {
+        id: "agent-8b",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: { responseId: "resp_existing" },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        wakeSource: "on_demand",
+        wakeTriggerDetail: "manual",
+        manualTaskMarkdown:
+          "Manual wake task context:\n- Trigger: on_demand/manual\n- Objective: Continue the active assignment and report status/progress.",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.previous_response_id).toBeUndefined();
+    expect(requestBody.x_context.paperclip.continuationPolicy.continuationMode).toBe("fresh");
+    expect(requestBody.x_context.paperclip.continuationPolicy.freshSessionReason).toBe(
+      "manual_on_demand_without_issue",
+    );
+    expect(requestBody.x_context.paperclip.continuationPolicy.conversationStrategy).toBe(
+      "manual_wake_fresh_session",
+    );
     expect(result.exitCode).toBe(0);
   });
 

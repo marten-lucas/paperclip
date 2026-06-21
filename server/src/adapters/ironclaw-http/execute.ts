@@ -80,6 +80,7 @@ type FreshSessionDecision = {
   forceFresh: boolean;
   reason:
     | "force_fresh_session_requested"
+    | "manual_on_demand_without_issue"
     | "retry_of_failed_run_no_prior_session"
     | "default_chained_session";
 };
@@ -98,6 +99,13 @@ function decideFreshSession(
 ): FreshSessionDecision {
   if (ctx.context.forceFreshSession === true) {
     return { forceFresh: true, reason: "force_fresh_session_requested" };
+  }
+
+  const wakeSource = asString(ctx.context.wakeSource, "").trim().toLowerCase();
+  const wakeTriggerDetail = asString(ctx.context.wakeTriggerDetail, "").trim().toLowerCase();
+  const issueId = asString(ctx.context.issueId, "").trim();
+  if (wakeSource === "on_demand" && wakeTriggerDetail === "manual" && !issueId) {
+    return { forceFresh: true, reason: "manual_on_demand_without_issue" };
   }
 
   const retryReason = asString(ctx.context.retryReason, "").trim();
@@ -315,6 +323,33 @@ function extractMessage(ctx: AdapterExecutionContext): string {
 
   const manualTaskMarkdown = asString(ctx.context.manualTaskMarkdown, "").trim();
   if (manualTaskMarkdown.length > 0) {
+    const wakeSource = asString(ctx.context.wakeSource, "").trim().toLowerCase();
+    const wakeTriggerDetail = asString(ctx.context.wakeTriggerDetail, "").trim().toLowerCase();
+    const issueId = asString(ctx.context.issueId, "").trim();
+    const taskKey = asString(ctx.context.taskKey, "").trim() || ctx.runtime.taskKey || "";
+    const lowerManualContext = manualTaskMarkdown.toLowerCase();
+    const needsManualSynthesis =
+      wakeSource === "on_demand"
+      && wakeTriggerDetail === "manual"
+      && !issueId
+      && !taskKey
+      && lowerManualContext.includes("objective: continue the active assignment and report status/progress");
+
+    if (needsManualSynthesis) {
+      return [
+        `${agentLabel} heartbeat task:`,
+        "",
+        "Manual wake task context:",
+        manualTaskMarkdown,
+        "",
+        "Execution focus:",
+        "- Reconstruct the active assignment from available run/thread context before taking action.",
+        "- Continue that assignment with concrete progress, delegated actions, or explicit blockers.",
+        "- Do not switch to unrelated generic helpdesk workflows.",
+        "- If assignment context is missing, request the exact missing identifier (issueId/taskKey) and stop.",
+      ].join("\n");
+    }
+
     return `${agentLabel} heartbeat task:\n\n${manualTaskMarkdown}`;
   }
 
@@ -488,6 +523,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           conversationStrategy: freshSessionDecision.forceFresh
             ? (freshSessionDecision.reason === "retry_of_failed_run_no_prior_session"
               ? "retry_fresh_session"
+              : freshSessionDecision.reason === "manual_on_demand_without_issue"
+                ? "manual_wake_fresh_session"
               : "fresh_session")
             : previousResponseId
               ? "session_previous_response_id"
@@ -554,6 +591,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           strategy: freshSessionDecision.forceFresh
             ? (freshSessionDecision.reason === "retry_of_failed_run_no_prior_session"
               ? "retry_fresh_session"
+              : freshSessionDecision.reason === "manual_on_demand_without_issue"
+                ? "manual_wake_fresh_session"
               : "fresh_session")
             : previousResponseId
               ? "session_previous_response_id"
