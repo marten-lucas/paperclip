@@ -97,6 +97,10 @@ describe("ironclaw_http execute", () => {
       onLog: async () => {},
     });
 
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.timeout_sec).toBe(0);
+
     expect(result.timedOut).toBe(false);
     expect(result.exitCode).toBe(0);
   });
@@ -150,6 +154,10 @@ describe("ironclaw_http execute", () => {
       },
       onLog: async () => {},
     });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.timeout_sec).toBe(1);
 
     expect(result.timedOut).toBe(true);
     expect(result.errorCode).toBe("timeout");

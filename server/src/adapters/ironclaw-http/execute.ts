@@ -457,6 +457,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     : (previousResponseId || seededPreviousResponseId);
   const body: Record<string, unknown> = {
     input,
+    // Ironclaw extension: per-request response timeout in seconds.
+    // `0` means no Ironclaw-side response timeout.
+    timeout_sec: timeoutSec,
     // Force non-streaming mode so the adapter always receives a single
     // JSON payload and can reliably persist previous_response_id chaining.
     stream: false,
@@ -493,6 +496,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           retryRecommendation: "none",
         },
         requestControls: {
+          timeoutSec,
           temperature: Number.isFinite(temperature) ? temperature : null,
           numCtx: numCtx > 0 ? numCtx : null,
           thinkingMode,
