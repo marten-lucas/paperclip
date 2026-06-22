@@ -30,6 +30,27 @@ type RuntimeSkillSummary = {
   summary: string;
 };
 
+type CompletionDisposition =
+  | "done"
+  | "cancelled"
+  | "in_review"
+  | "blocked"
+  | "delegated_followup"
+  | "continue_in_progress";
+
+type ParsedCompletion = {
+  disposition: CompletionDisposition;
+  nextAction: string;
+  reason: string | null;
+};
+
+type CompletionValidation = {
+  ok: boolean;
+  errorCode?: "missing_structured_completion" | "invalid_completion_schema";
+  message?: string;
+  parsed?: ParsedCompletion;
+};
+
 function isHttpUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
@@ -232,7 +253,7 @@ async function readSelectedSkillMarkdown(
   };
 }
 
-function buildInstructionLayer(managedInstructions: string | null): string | null {
+function buildInstructionLayer(managedInstructions: string | null, enforceStructuredCompletion: boolean): string | null {
   const executionContract = [
     "Execution contract:",
     "- Act on the current heartbeat task and provide a concrete, actionable response.",
@@ -240,11 +261,28 @@ function buildInstructionLayer(managedInstructions: string | null): string | nul
     "- Avoid one-token acknowledgements; provide useful output.",
   ].join("\n");
 
+  const completionContract = enforceStructuredCompletion
+    ? [
+      "",
+      "Required completion format:",
+      "- End your response with a single JSON object.",
+      "- Use key `paperclip_completion` with fields:",
+      "  - disposition: one of done, cancelled, in_review, blocked, delegated_followup, continue_in_progress",
+      "  - next_action: non-empty string",
+      "  - reason: optional string",
+      "- For `in_review`, include at least one of: review_owner, review_path, pending_interaction_id, pending_approval_id.",
+      "- For `blocked`, include at least one of: blocked_by, unblock_owner.",
+      "- For `delegated_followup`, include at least one of: follow_up_issue_id, follow_up_task_key.",
+      "- For `continue_in_progress`, include resume_intent=true or resume_from_run_id.",
+    ].join("\n")
+    : "";
+  const combinedContract = `${executionContract}${completionContract}`;
+
   if (!managedInstructions) {
-    return truncateChars(executionContract, MAX_INSTRUCTIONS_CHARS);
+    return truncateChars(combinedContract, MAX_INSTRUCTIONS_CHARS);
   }
 
-  return truncateChars(`${managedInstructions}\n\n${executionContract}`, MAX_INSTRUCTIONS_CHARS);
+  return truncateChars(`${managedInstructions}\n\n${combinedContract}`, MAX_INSTRUCTIONS_CHARS);
 }
 
 function buildTaskInputLayer(ctx: AdapterExecutionContext): string {
@@ -274,6 +312,7 @@ function buildRuntimeSkillContext(skillBundle: {
 async function buildPromptInput(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
+  enforceStructuredCompletion: boolean,
 ): Promise<{
   taskInput: string;
   instructions: string | null;
@@ -288,8 +327,142 @@ async function buildPromptInput(
   return {
     taskInput: buildTaskInputLayer(ctx),
     hasManagedInstructions: Boolean(instructions.content),
-    instructions: buildInstructionLayer(instructions.content),
+    instructions: buildInstructionLayer(instructions.content, enforceStructuredCompletion),
     runtimeSkillMeta: buildRuntimeSkillContext(skillBundle),
+  };
+}
+
+function parseJsonObjectCandidate(value: string): Record<string, unknown> | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parseConfiguredMetadata(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const fenceRegex = /```json\s*([\s\S]*?)```/gi;
+  for (const match of text.matchAll(fenceRegex)) {
+    const candidate = (match[1] ?? "").trim();
+    if (candidate) candidates.push(candidate);
+  }
+  if (text.trim()) candidates.push(text.trim());
+  return candidates;
+}
+
+function parseStructuredCompletion(text: string): Record<string, unknown> | null {
+  for (const candidate of extractJsonCandidates(text)) {
+    const parsed = parseJsonObjectCandidate(candidate);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function asDisposition(value: unknown): CompletionDisposition | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  const dispositions: CompletionDisposition[] = [
+    "done",
+    "cancelled",
+    "in_review",
+    "blocked",
+    "delegated_followup",
+    "continue_in_progress",
+  ];
+  return dispositions.includes(normalized as CompletionDisposition)
+    ? (normalized as CompletionDisposition)
+    : null;
+}
+
+function validateIssueCompletionContract(text: string): CompletionValidation {
+  const parsed = parseStructuredCompletion(text);
+  if (!parsed) {
+    return {
+      ok: false,
+      errorCode: "missing_structured_completion",
+      message: "Ironclaw response did not include the required structured completion JSON.",
+    };
+  }
+
+  const completion = parseObject(parsed.paperclip_completion ?? parsed);
+  const disposition = asDisposition(completion.disposition);
+  const nextAction = asString(completion.next_action ?? completion.nextAction, "").trim();
+  const reason = asString(completion.reason, "").trim() || null;
+
+  if (!disposition || !nextAction) {
+    return {
+      ok: false,
+      errorCode: "invalid_completion_schema",
+      message: "Structured completion must include disposition and non-empty next_action.",
+    };
+  }
+
+  if (disposition === "in_review") {
+    const hasReviewPath =
+      hasNonEmptyString(completion.review_owner)
+      || hasNonEmptyString(completion.review_path)
+      || hasNonEmptyString(completion.pending_interaction_id)
+      || hasNonEmptyString(completion.pending_approval_id);
+    if (!hasReviewPath) {
+      return {
+        ok: false,
+        errorCode: "invalid_completion_schema",
+        message: "Disposition in_review requires review_owner, review_path, pending_interaction_id, or pending_approval_id.",
+      };
+    }
+  }
+
+  if (disposition === "blocked") {
+    const hasBlockerPath = hasNonEmptyString(completion.blocked_by) || hasNonEmptyString(completion.unblock_owner);
+    if (!hasBlockerPath) {
+      return {
+        ok: false,
+        errorCode: "invalid_completion_schema",
+        message: "Disposition blocked requires blocked_by or unblock_owner.",
+      };
+    }
+  }
+
+  if (disposition === "delegated_followup") {
+    const hasFollowUpPath =
+      hasNonEmptyString(completion.follow_up_issue_id) || hasNonEmptyString(completion.follow_up_task_key);
+    if (!hasFollowUpPath) {
+      return {
+        ok: false,
+        errorCode: "invalid_completion_schema",
+        message: "Disposition delegated_followup requires follow_up_issue_id or follow_up_task_key.",
+      };
+    }
+  }
+
+  if (disposition === "continue_in_progress") {
+    const resumeIntent = completion.resume_intent === true;
+    const hasResumeRun = hasNonEmptyString(completion.resume_from_run_id);
+    if (!resumeIntent && !hasResumeRun) {
+      return {
+        ok: false,
+        errorCode: "invalid_completion_schema",
+        message: "Disposition continue_in_progress requires resume_intent=true or resume_from_run_id.",
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    parsed: {
+      disposition,
+      nextAction,
+      reason,
+    },
   };
 }
 
@@ -465,14 +638,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const promptInput = await buildPromptInput(ctx, config);
+  const issueId = asString(ctx.context.issueId, "").trim();
+  const issueBoundRun = issueId.length > 0;
+  const promptInput = await buildPromptInput(ctx, config, issueBoundRun);
   const input = promptInput.taskInput;
   const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
   const wakeSource = asString(ctx.context.wakeSource, "").trim();
   const wakeReason = asString(ctx.context.wakeReason, "").trim();
   const wakeTriggerDetail = asString(ctx.context.wakeTriggerDetail, "").trim();
   const taskKey = asString(ctx.context.taskKey, "").trim() || ctx.runtime.taskKey || "";
-  const issueId = asString(ctx.context.issueId, "").trim();
   const strategicContext = parseObject(ctx.context.paperclipStrategicContext);
   const configuredMetadata =
     parseConfiguredMetadata(config.metadata) ?? parseMetadataJson(config.metadataJson) ?? null;
@@ -660,8 +834,37 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       retry_recommendation: retryRecommendation,
     };
 
+    const completionValidation = issueBoundRun
+      ? validateIssueCompletionContract(text)
+      : { ok: true };
+    payload.paperclip_completion_validation = completionValidation.ok
+      ? { ok: true, enforced: issueBoundRun, parsed: completionValidation.parsed ?? null }
+      : {
+        ok: false,
+        enforced: true,
+        errorCode: completionValidation.errorCode ?? "invalid_completion_schema",
+        message: completionValidation.message ?? "Structured completion validation failed.",
+      };
+
     if (text) {
       await ctx.onLog("stdout", `${text}\n`);
+    }
+
+    if (!completionValidation.ok) {
+      await ctx.onLog(
+        "stderr",
+        `[paperclip] Error: missing or invalid issue disposition contract in Ironclaw response (${completionValidation.errorCode ?? "invalid_completion_schema"}). ${completionValidation.message ?? ""}\n`,
+      );
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: completionValidation.errorCode === "missing_structured_completion"
+          ? "ironclaw_missing_disposition"
+          : "ironclaw_invalid_disposition",
+        errorMessage: completionValidation.message ?? "Structured completion validation failed.",
+        resultJson: payload,
+      };
     }
 
     if (responseQuality === "low_signal_short_text") {

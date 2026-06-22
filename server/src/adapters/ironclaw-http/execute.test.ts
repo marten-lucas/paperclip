@@ -433,6 +433,58 @@ describe("ironclaw_http execute", () => {
     });
   });
 
+  it("fails issue-bound runs when structured completion/disposition is missing", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_missing_disposition_1",
+      model: "qwen3:8b",
+      status: "completed",
+      output: [{ type: "message", content: "I updated docs and shared progress notes." }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-missing-disposition-1",
+      agent: {
+        id: "agent-missing-disposition-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        issueId: "issue-42",
+        input: "Continue the issue.",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("ironclaw_missing_disposition");
+    expect(result.resultJson).toMatchObject({
+      paperclip_completion_validation: {
+        ok: false,
+        enforced: true,
+        errorCode: "missing_structured_completion",
+      },
+    });
+  });
+
   it("warns when Ironclaw returns a suspiciously short non-stream response", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_short_warn_1",
@@ -958,7 +1010,11 @@ describe("ironclaw_http execute", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_601",
       model: "default",
-      output: [{ type: "message", content: "ok" }],
+      output: [{
+        type: "message",
+        content:
+          "{\"paperclip_completion\":{\"disposition\":\"continue_in_progress\",\"next_action\":\"Resume from run resp_601 and execute the next checkpoint.\",\"resume_intent\":true}}",
+      }],
     }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -1009,7 +1065,11 @@ describe("ironclaw_http execute", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_602",
       model: "default",
-      output: [{ type: "message", content: "ok" }],
+      output: [{
+        type: "message",
+        content:
+          "{\"paperclip_completion\":{\"disposition\":\"continue_in_progress\",\"next_action\":\"Start a fresh retry execution path from this run.\",\"resume_intent\":true}}",
+      }],
     }), {
       status: 200,
       headers: { "content-type": "application/json" },
