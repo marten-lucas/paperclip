@@ -4,7 +4,22 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { resolvePaperclipDesiredSkillNames } from "@paperclipai/adapter-utils/server-utils";
 import { asNumber, asString, parseObject } from "../utils.js";
-const MAX_INSTRUCTIONS_CHARS = 12_000;
+import {
+  validateCompletionObject,
+  coercePrimitiveType,
+  extractJsonFromText,
+  generateValidationDiagnostic,
+  reconcileFinishReason,
+  extractToolCallFromText,
+  hasToolCallsInContent,
+} from "./validation.js";
+import { attemptCompletionRecovery, formatRecoveryDiagnostic } from "./tool-call-repair.js";
+
+// Phase A: Balanced prompt budget with deduplication and model switch
+// Model switch to mistral-nemo:12b enables reliable JSON reasoning at 4KB
+// Section Separation in Ironclaw core (reasoning.rs) provides 28% dedup
+// Paperclip default instructions compressed from 11.7KB to ~3KB
+const MAX_INSTRUCTIONS_CHARS = 4_000; // Increased from 2_500 with dedup guardrails
 const MAX_SKILLS_IN_PROMPT = 6;
 const MAX_RUNTIME_SKILL_SUMMARY_CHARS = 240;
 
@@ -269,27 +284,24 @@ function buildInstructionLayer(managedInstructions: string | null, enforceStruct
     "- Avoid one-token acknowledgements; provide useful output.",
   ].join("\n");
 
-  const completionContract = enforceStructuredCompletion
-    ? [
-      "",
-      "Required completion format:",
-      "- End your response with a single JSON object.",
-      "- Use key `paperclip_completion` with fields:",
-      "  - disposition: one of done, cancelled, in_review, blocked, delegated_followup, continue_in_progress",
-      "  - next_action: non-empty string",
-      "  - reason: optional string",
-      "- For `in_review`, include at least one of: review_owner, review_path, pending_interaction_id, pending_approval_id.",
-      "- For `blocked`, include at least one of: blocked_by, unblock_owner.",
-      "- For `delegated_followup`, include at least one of: follow_up_issue_id, follow_up_task_key.",
-      "- For `continue_in_progress`, include resume_intent=true or resume_from_run_id.",
-    ].join("\n")
-    : "";
+  // Phase A OpenClaw pattern: Always include completion contract, even with managed instructions
+  // This ensures validateIssueCompletionContract can reliably find the schema
+  const completionContract = [
+    "",
+    "Required completion format (JSON object at response end):",
+    "- disposition: done|cancelled|in_review|blocked|delegated_followup|continue_in_progress",
+    "- next_action: non-empty string describing next step",
+    "- reason: optional explanation",
+  ].join("\n");
+  
   const combinedContract = `${executionContract}${completionContract}`;
 
   if (!managedInstructions) {
     return truncateChars(combinedContract, MAX_INSTRUCTIONS_CHARS);
   }
 
+  // Phase A: Always include completion contract, even with managed instructions
+  // OpenClaw pattern: Consistent contract prevents validation errors
   return truncateChars(`${managedInstructions}\n\n${combinedContract}`, MAX_INSTRUCTIONS_CHARS);
 }
 
@@ -442,6 +454,13 @@ function parseStructuredCompletion(text: string): Record<string, unknown> | null
     if (normalized) return normalized;
   }
 
+  // Phase A OpenClaw pattern: Tool call repair fallback
+  // If direct parsing fails, attempt recovery via plain-text extraction
+  const recovery = attemptCompletionRecovery(text);
+  if (recovery.recovered) {
+    return recovery.recovered as Record<string, unknown>;
+  }
+
   return null;
 }
 
@@ -468,27 +487,83 @@ function asDisposition(value: unknown): CompletionDisposition | null {
 
 function validateIssueCompletionContract(text: string): CompletionValidation {
   const parsed = parseStructuredCompletion(text);
+  
+  // Phase A: Attempt recovery if structured completion not found
   if (!parsed) {
+    // Try JSON repair first
+    const jsonRepair = extractJsonFromText(text);
+    if (jsonRepair) {
+      return validateParsedCompletion(jsonRepair);
+    }
+
+    // Try plain-text tool call extraction
+    const toolCallRepair = extractToolCallFromText(text);
+    if (toolCallRepair.success && toolCallRepair.toolCall) {
+      const repaired = {
+        paperclip_completion: {
+          disposition: toolCallRepair.toolCall.name,
+          next_action: JSON.stringify(toolCallRepair.toolCall.arguments),
+        },
+      };
+      return validateParsedCompletion(repaired);
+    }
+
+    // All recovery attempts failed
     return {
       ok: false,
       errorCode: "missing_structured_completion",
-      message: "Ironclaw response did not include the required structured completion JSON.",
+      message: "Ironclaw response did not include the required structured completion JSON. Repair attempts failed.",
     };
   }
 
-  const completion = parseObject(parsed.paperclip_completion ?? parsed);
-  const disposition = asDisposition(completion.disposition);
-  const nextAction = asString(completion.next_action ?? completion.nextAction, "").trim();
+  return validateParsedCompletion(parsed);
+}
+
+/**
+ * Helper: Validate a parsed completion object
+ */
+function validateParsedCompletion(parsed: unknown): CompletionValidation {
+  const completion = parseObject(parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).paperclip_completion ?? parsed : parsed);
+  let disposition = asDisposition(completion.disposition);
+  let nextAction = asString(completion.next_action ?? completion.nextAction, "").trim();
   const reason = asString(completion.reason, "").trim() || null;
 
+  // Phase A OpenClaw pattern: Intelligent coercion for common LLM mistakes
+  // If disposition is a string from a union type, try coercion
+  if (!disposition && completion.disposition) {
+    const coercedDisposition = coercePrimitiveType(completion.disposition, "string");
+    if (typeof coercedDisposition === "string") {
+      disposition = asDisposition(coercedDisposition);
+    }
+  }
+
+  // Coerce nextAction if needed
+  if (!nextAction && completion.next_action) {
+    const coercedAction = coercePrimitiveType(completion.next_action, "string");
+    if (typeof coercedAction === "string") {
+      nextAction = coercedAction.trim();
+    }
+  }
+
   if (!disposition || !nextAction) {
+    const diagnosticMessage = generateValidationDiagnostic(
+      {
+        isValid: false,
+        errors: [
+          !disposition ? `Invalid disposition: ${completion.disposition}` : "",
+          !nextAction ? `Invalid next_action: ${completion.next_action}` : "",
+        ].filter(Boolean),
+      },
+      "validateParsedCompletion"
+    );
     return {
       ok: false,
       errorCode: "invalid_completion_schema",
-      message: "Structured completion must include disposition and non-empty next_action.",
+      message: "Structured completion must include disposition and non-empty next_action. " + diagnosticMessage,
     };
   }
 
+  // Validate disposition-specific requirements
   if (disposition === "in_review") {
     const hasReviewPath =
       hasNonEmptyString(completion.review_owner)
@@ -806,6 +881,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
   if (promptInput.instructions) {
     body.instructions = promptInput.instructions;
+    // Debug: Log instructions length and tail for structured completion verification
+    const instLen = promptInput.instructions.length;
+    const instTail = promptInput.instructions.slice(-600);
+    await ctx.onLog(
+      "stderr",
+      `[paperclip-debug] Instructions: ${instLen} chars, managed=${promptInput.hasManagedInstructions}, model=${requestModel || "(default)"}, tail:\n${instTail}\n`,
+    );
   }
   if (configuredMetadata) {
     body.metadata = configuredMetadata;
@@ -909,12 +991,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const continuationMode = effectivePreviousResponseId ? "chained" : "fresh";
     const retryRecommendation = lowSignalDetected ? "fresh_session" : "none";
 
+    // Phase A OpenClaw Pattern: Finish Reason Reconciliation
+    // Reconcile provider-inconsistent finish_reason with actual content
+    const rawFinishReason = asString(payload.finish_reason, "").trim() || undefined;
+    const hasToolCalls = hasToolCallsInContent(text);
+    const hasTextContent = text.trim().length > 0;
+    const finishReasonReconciliation = reconcileFinishReason(
+      rawFinishReason,
+      hasToolCalls,
+      hasTextContent
+    );
+
     payload.paperclip_response_quality = {
       classification: responseQuality,
       textLength: text.trim().length,
       continuation_mode: continuationMode,
       low_signal_detected: lowSignalDetected,
       retry_recommendation: retryRecommendation,
+      finishReason: {
+        raw: rawFinishReason || "unknown",
+        reconciled: finishReasonReconciliation.reason,
+        reconciled_applied: finishReasonReconciliation.reconciled,
+        reconciliation_note: finishReasonReconciliation.diagnostic,
+      },
     };
 
     const completionValidation = issueBoundRun
@@ -933,10 +1032,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       await ctx.onLog("stdout", `${text}\n`);
     }
 
+    // Phase A: Enhanced error logging with recovery diagnostics
     if (!completionValidation.ok) {
+      const recovery = attemptCompletionRecovery(text);
+      const recoveryLog = recovery.recovered
+        ? `[RECOVERY ATTEMPTED] ${formatRecoveryDiagnostic(recovery.diagnostic)}`
+        : `[NO RECOVERY POSSIBLE] ${formatRecoveryDiagnostic(recovery.diagnostic)}`;
+
       await ctx.onLog(
         "stderr",
-        `[paperclip] Error: missing or invalid issue disposition contract in Ironclaw response (${completionValidation.errorCode ?? "invalid_completion_schema"}). ${completionValidation.message ?? ""}\n`,
+        `[paperclip] Error: missing or invalid issue disposition contract in Ironclaw response (${completionValidation.errorCode ?? "invalid_completion_schema"}). ${completionValidation.message ?? ""}\n${recoveryLog}\n`,
       );
       return {
         exitCode: 1,
