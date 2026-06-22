@@ -225,11 +225,13 @@ describe("ironclaw_http execute", () => {
         agentName: "Agent",
       },
       conversation: {
-        label: "Agent heartbeat",
-        title: "Agent",
         kind: "paperclip_heartbeat",
       },
     });
+    expect(requestBody.x_context?.conversation?.label).toContain("Agent heartbeat |");
+    expect(requestBody.x_context?.conversation?.label).toContain("run run-2");
+    expect(requestBody.x_context?.conversation?.title).toContain("Agent |");
+    expect(requestBody.x_context?.conversation?.title).toContain("run run-2");
 
     expect(result.exitCode).toBe(0);
     expect(result.sessionParams).toEqual({ responseId: "resp_123" });
@@ -485,6 +487,156 @@ describe("ironclaw_http execute", () => {
     });
   });
 
+  it("executes caller tool roundtrip via function_call_output", async () => {
+    const originalPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3100";
+
+    let ironclawRequestCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://127.0.0.1:3100/api/health") {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url === "http://127.0.0.1:3000/api/v1/responses") {
+        ironclawRequestCount += 1;
+        if (ironclawRequestCount === 1) {
+          return new Response(JSON.stringify({
+            id: "resp_tool_1",
+            model: "default",
+            output: [
+              {
+                type: "function_call",
+                call_id: "call_1",
+                name: "paperclip_api_call",
+                arguments: JSON.stringify({ method: "GET", path: "/api/health" }),
+              },
+            ],
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          id: "resp_tool_2",
+          model: "default",
+          output: [{ type: "message", content: "Tool roundtrip completed." }],
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return new Response("unexpected url", { status: 500 });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await execute({
+        runId: "run-tool-roundtrip",
+        agent: {
+          id: "agent-tool-roundtrip",
+          companyId: "company-1",
+          name: "CEO",
+          adapterType: "ironclaw_http",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          env: {
+            IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+            IRONCLAW_API_KEY: "token-123",
+          },
+        },
+        context: {
+          input: "Continue.",
+        },
+        authToken: "paperclip-jwt",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+      const firstIronclawBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+      expect(firstIronclawBody.tools).toBeDefined();
+      expect(firstIronclawBody.tools[0]?.name).toBe("paperclip_api_call");
+
+      const secondIronclawBody = JSON.parse(String(calls[2]?.[1]?.body ?? "{}"));
+      expect(secondIronclawBody.previous_response_id).toBe("resp_tool_1");
+      expect(secondIronclawBody.input?.[0]).toMatchObject({
+        type: "function_call_output",
+        call_id: "call_1",
+      });
+    } finally {
+      process.env.PAPERCLIP_API_URL = originalPaperclipApiUrl;
+    }
+  });
+
+  it("returns explicit engine-v2-required error when Ironclaw rejects caller tools", async () => {
+    const originalPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3100";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "http://127.0.0.1:3000/api/v1/responses") {
+        return new Response("Caller-supplied 'tools' require engine v2 to be enabled on the server", {
+          status: 400,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      return new Response("unexpected url", { status: 500 });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await execute({
+        runId: "run-engine-v2-gate",
+        agent: {
+          id: "agent-engine-v2-gate",
+          companyId: "company-1",
+          name: "CEO",
+          adapterType: "ironclaw_http",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          env: {
+            IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+            IRONCLAW_API_KEY: "token-123",
+          },
+        },
+        context: {
+          input: "Continue.",
+        },
+        authToken: "paperclip-jwt",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("ironclaw_engine_v2_required");
+      expect(result.errorMessage).toContain("engine v2");
+    } finally {
+      process.env.PAPERCLIP_API_URL = originalPaperclipApiUrl;
+    }
+  });
+
   it("warns when Ironclaw returns a suspiciously short non-stream response", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_short_warn_1",
@@ -684,8 +836,10 @@ describe("ironclaw_http execute", () => {
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
     const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
     expect(requestBody.input).toBe("CEO heartbeat task:\n\nExecute the assigned task.");
-    expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
-    expect(requestBody.x_context?.conversation?.title).toBe("CEO");
+    expect(requestBody.x_context?.conversation?.label).toContain("CEO heartbeat |");
+    expect(requestBody.x_context?.conversation?.label).toContain("run run-6");
+    expect(requestBody.x_context?.conversation?.title).toContain("CEO |");
+    expect(requestBody.x_context?.conversation?.title).toContain("run run-6");
     expect(requestBody.x_context?.paperclip?.wakeSource).toBeNull();
     expect(result.exitCode).toBe(0);
   });
@@ -827,8 +981,10 @@ describe("ironclaw_http execute", () => {
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
     const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
     expect(requestBody.previous_response_id).toBeUndefined();
-    expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
-    expect(requestBody.x_context?.conversation?.title).toBe("CEO");
+    expect(requestBody.x_context?.conversation?.label).toContain("CEO heartbeat |");
+    expect(requestBody.x_context?.conversation?.label).toContain("run run-8");
+    expect(requestBody.x_context?.conversation?.title).toContain("CEO |");
+    expect(requestBody.x_context?.conversation?.title).toContain("run run-8");
     expect(result.exitCode).toBe(0);
   });
 

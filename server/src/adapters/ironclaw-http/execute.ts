@@ -7,6 +7,8 @@ import { asNumber, asString, parseObject } from "../utils.js";
 const MAX_INSTRUCTIONS_CHARS = 12_000;
 const MAX_SKILLS_IN_PROMPT = 6;
 const MAX_RUNTIME_SKILL_SUMMARY_CHARS = 240;
+const MAX_TOOL_ROUNDTRIPS = 6;
+const MAX_TOOL_OUTPUT_CHARS = 20_000;
 
 type ResponseQualityClassification = "empty_text" | "low_signal_short_text" | "normal_text";
 
@@ -49,6 +51,21 @@ type CompletionValidation = {
   errorCode?: "missing_structured_completion" | "invalid_completion_schema";
   message?: string;
   parsed?: ParsedCompletion;
+};
+
+type IronclawFunctionCall = {
+  callId: string;
+  name: string;
+  argumentsJson: string;
+};
+
+type PaperclipApiCallArgs = {
+  method?: string;
+  path?: string;
+  url?: string;
+  query?: Record<string, unknown>;
+  body?: unknown;
+  headers?: Record<string, unknown>;
 };
 
 function isHttpUrl(value: string): boolean {
@@ -138,14 +155,14 @@ function decideFreshSession(
   return { forceFresh: false, reason: "default_chained_session" };
 }
 
-function buildConversationLabel(agentLabel: string): string {
-  if (/\bceo\b/i.test(agentLabel)) return "CEO heartbeat";
-  return `${agentLabel} heartbeat`;
+function buildConversationLabel(agentLabel: string, runId: string, callIsoTime: string): string {
+  const base = /\bceo\b/i.test(agentLabel) ? "CEO heartbeat" : `${agentLabel} heartbeat`;
+  return `${base} | ${callIsoTime} | run ${runId}`;
 }
 
-function buildConversationTitle(agentLabel: string): string {
-  if (/\bceo\b/i.test(agentLabel)) return "CEO";
-  return agentLabel;
+function buildConversationTitle(agentLabel: string, runId: string, callIsoTime: string): string {
+  const base = /\bceo\b/i.test(agentLabel) ? "CEO" : agentLabel;
+  return `${base} | ${callIsoTime} | run ${runId}`;
 }
 
 function truncateChars(value: string, maxChars: number): string {
@@ -466,6 +483,226 @@ function validateIssueCompletionContract(text: string): CompletionValidation {
   };
 }
 
+function trimToolOutput(value: unknown): string {
+  const rendered = typeof value === "string" ? value : JSON.stringify(value);
+  if (rendered.length <= MAX_TOOL_OUTPUT_CHARS) return rendered;
+  return `${rendered.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n...[truncated by Paperclip tool bridge]`;
+}
+
+function extractFunctionCalls(output: unknown): IronclawFunctionCall[] {
+  if (!Array.isArray(output)) return [];
+
+  const calls: IronclawFunctionCall[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const typed = item as Record<string, unknown>;
+    if (typed.type !== "function_call") continue;
+    const callId = asString(typed.call_id, "").trim();
+    const name = asString(typed.name, "").trim();
+    const argumentsJson = asString(typed.arguments, "").trim();
+    if (!callId || !name) continue;
+    calls.push({ callId, name, argumentsJson });
+  }
+
+  return calls;
+}
+
+function resolvePaperclipApiBaseUrl(ctx: AdapterExecutionContext): string {
+  const fromContext = asString((ctx.context as Record<string, unknown>).paperclipApiUrl, "").trim();
+  const fromEnv = asString(process.env.PAPERCLIP_API_URL, "").trim();
+  const candidate = fromContext || fromEnv;
+  if (!candidate) return "";
+  return candidate.replace(/\/+$/, "");
+}
+
+function buildPaperclipApiToolSpec(): Record<string, unknown> {
+  return {
+    type: "function",
+    name: "paperclip_api_call",
+    description: "Call the Paperclip API for issue/task workflow operations using the current run identity.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        method: { type: "string", enum: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+        path: { type: "string", description: "Paperclip API path beginning with /api/" },
+        url: { type: "string", description: "Optional absolute URL to Paperclip API (same host only)." },
+        query: { type: "object", additionalProperties: true },
+        body: { type: ["object", "array", "string", "number", "boolean", "null"] },
+        headers: { type: "object", additionalProperties: { type: "string" } },
+      },
+      required: [],
+    },
+  };
+}
+
+function parseToolArgs(call: IronclawFunctionCall): PaperclipApiCallArgs {
+  const parsed = parseJsonObjectCandidate(call.argumentsJson) ?? {};
+  return {
+    method: asString(parsed.method, "").trim(),
+    path: asString(parsed.path, "").trim(),
+    url: asString(parsed.url, "").trim(),
+    query: parseObject(parsed.query),
+    body: parsed.body,
+    headers: parseObject(parsed.headers),
+  };
+}
+
+function appendQueryParams(url: URL, query: Record<string, unknown>) {
+  for (const [key, value] of Object.entries(query)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (entry == null) continue;
+        url.searchParams.append(key, String(entry));
+      }
+      continue;
+    }
+    url.searchParams.set(key, String(value));
+  }
+}
+
+async function executePaperclipApiToolCall(
+  ctx: AdapterExecutionContext,
+  call: IronclawFunctionCall,
+): Promise<{ call_id: string; output: string }> {
+  const baseUrl = resolvePaperclipApiBaseUrl(ctx);
+  const authToken = asString(ctx.authToken, "").trim();
+  if (!baseUrl || !authToken) {
+    return {
+      call_id: call.callId,
+      output: trimToolOutput({
+        ok: false,
+        error: "paperclip_api_unavailable",
+        message: "Paperclip API base URL or auth token is unavailable for tool execution.",
+      }),
+    };
+  }
+
+  const args = parseToolArgs(call);
+  const method = (args.method || "GET").toUpperCase();
+  const allowedMethods = new Set(["GET", "POST", "PATCH", "PUT", "DELETE"]);
+  if (!allowedMethods.has(method)) {
+    return {
+      call_id: call.callId,
+      output: trimToolOutput({
+        ok: false,
+        error: "invalid_method",
+        message: `Unsupported method: ${method}`,
+      }),
+    };
+  }
+
+  let resolvedUrl: URL;
+  try {
+    if (args.url) {
+      const candidate = new URL(args.url);
+      const expected = new URL(baseUrl);
+      if (candidate.origin !== expected.origin || !candidate.pathname.startsWith("/api/")) {
+        return {
+          call_id: call.callId,
+          output: trimToolOutput({
+            ok: false,
+            error: "invalid_url_scope",
+            message: "Tool URL must target the configured Paperclip host and /api/* path.",
+          }),
+        };
+      }
+      resolvedUrl = candidate;
+    } else {
+      const normalizedPath = args.path || "";
+      if (!normalizedPath.startsWith("/api/")) {
+        return {
+          call_id: call.callId,
+          output: trimToolOutput({
+            ok: false,
+            error: "invalid_path_scope",
+            message: "Tool path must start with /api/.",
+          }),
+        };
+      }
+      resolvedUrl = new URL(`${baseUrl}${normalizedPath}`);
+    }
+  } catch (error) {
+    return {
+      call_id: call.callId,
+      output: trimToolOutput({
+        ok: false,
+        error: "invalid_url",
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    };
+  }
+
+  appendQueryParams(resolvedUrl, args.query ?? {});
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${authToken}`,
+    accept: "application/json",
+    "x-paperclip-run-id": ctx.runId,
+  };
+  for (const [key, value] of Object.entries(args.headers ?? {})) {
+    if (typeof value !== "string") continue;
+    const lower = key.toLowerCase();
+    if (lower === "authorization" || lower === "cookie") continue;
+    headers[key] = value;
+  }
+
+  const requestInit: RequestInit = {
+    method,
+    headers,
+  };
+  if (args.body !== undefined && method !== "GET") {
+    headers["content-type"] = "application/json";
+    requestInit.body = JSON.stringify(args.body);
+  }
+
+  try {
+    const response = await fetch(resolvedUrl.toString(), requestInit);
+    const bodyText = await response.text().catch(() => "");
+    const bodyJson = parseJsonObjectCandidate(bodyText);
+    return {
+      call_id: call.callId,
+      output: trimToolOutput({
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        url: resolvedUrl.toString(),
+        body: bodyJson ?? bodyText,
+      }),
+    };
+  } catch (error) {
+    return {
+      call_id: call.callId,
+      output: trimToolOutput({
+        ok: false,
+        error: "request_failed",
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    };
+  }
+}
+
+async function executeFunctionCalls(
+  ctx: AdapterExecutionContext,
+  calls: IronclawFunctionCall[],
+): Promise<Array<{ type: "function_call_output"; call_id: string; output: string }>> {
+  const outputs: Array<{ type: "function_call_output"; call_id: string; output: string }> = [];
+  for (const call of calls) {
+    if (call.name === "paperclip_api_call") {
+      const toolResult = await executePaperclipApiToolCall(ctx, call);
+      outputs.push({ type: "function_call_output", call_id: toolResult.call_id, output: toolResult.output });
+      continue;
+    }
+
+    outputs.push({
+      type: "function_call_output",
+      call_id: call.callId,
+      output: trimToolOutput({ ok: false, error: "unknown_tool", name: call.name }),
+    });
+  }
+  return outputs;
+}
+
 function parseConfiguredMetadata(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -642,6 +879,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const issueBoundRun = issueId.length > 0;
   const promptInput = await buildPromptInput(ctx, config, issueBoundRun);
   const input = promptInput.taskInput;
+  const callIsoTime = new Date().toISOString();
   const agentLabel = asString(ctx.agent.name, "").trim() || "Agent";
   const wakeSource = asString(ctx.context.wakeSource, "").trim();
   const wakeReason = asString(ctx.context.wakeReason, "").trim();
@@ -715,12 +953,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         },
       },
       conversation: {
-        label: buildConversationLabel(agentLabel),
-        title: buildConversationTitle(agentLabel),
+        label: buildConversationLabel(agentLabel, ctx.runId, callIsoTime),
+        title: buildConversationTitle(agentLabel, ctx.runId, callIsoTime),
         kind: "paperclip_heartbeat",
       },
     },
   };
+  if (resolvePaperclipApiBaseUrl(ctx) && asString(ctx.authToken, "").trim()) {
+    body.tools = [buildPaperclipApiToolSpec()];
+  }
   if (promptInput.instructions) {
     body.instructions = promptInput.instructions;
   }
@@ -784,40 +1025,117 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    const sendResponsesRequest = async (requestBody: Record<string, unknown>) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorCode: "ironclaw_http_error",
-        errorMessage: `Ironclaw request failed with status ${response.status}${errorText ? `: ${errorText.slice(0, 200)}` : ""}`,
-      };
-    }
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        const lowerError = errorText.toLowerCase();
+        if (
+          requestBody.tools
+          && lowerError.includes("caller-supplied 'tools' require engine v2")
+        ) {
+          return {
+            ok: false as const,
+            errorCode: "ironclaw_engine_v2_required",
+            errorMessage: "Ironclaw rejected caller tools because engine v2 is not enabled.",
+            errorText,
+          };
+        }
 
-    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    const responseStatus = asString(payload.status, "").trim().toLowerCase();
-    if (responseStatus === "failed") {
-      const responseError = parseObject(payload.error);
-      const responseErrorMessage = asString(responseError.message, "").trim();
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorCode: "ironclaw_response_failed",
-        errorMessage: responseErrorMessage || "Ironclaw response status=failed",
-        resultJson: payload,
+        return {
+          ok: false as const,
+          errorCode: "ironclaw_http_error",
+          errorMessage: `Ironclaw request failed with status ${response.status}${errorText ? `: ${errorText.slice(0, 200)}` : ""}`,
+          errorText,
+        };
+      }
+
+      const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      const responseStatus = asString(payload.status, "").trim().toLowerCase();
+      if (responseStatus === "failed") {
+        const responseError = parseObject(payload.error);
+        const responseErrorMessage = asString(responseError.message, "").trim();
+        return {
+          ok: false as const,
+          errorCode: "ironclaw_response_failed",
+          errorMessage: responseErrorMessage || "Ironclaw response status=failed",
+          payload,
+        };
+      }
+
+      return { ok: true as const, payload };
+    };
+
+    let payload: Record<string, unknown> = {};
+    let currentBody: Record<string, unknown> = body;
+    for (let round = 0; round <= MAX_TOOL_ROUNDTRIPS; round += 1) {
+      const responseResult = await sendResponsesRequest(currentBody);
+      if (!responseResult.ok) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: responseResult.errorCode,
+          errorMessage: responseResult.errorMessage,
+          resultJson: responseResult.payload,
+        };
+      }
+
+      payload = responseResult.payload;
+      const functionCalls = extractFunctionCalls(payload.output);
+      if (functionCalls.length === 0) break;
+      if (round === MAX_TOOL_ROUNDTRIPS) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "ironclaw_tool_roundtrip_limit",
+          errorMessage: `Tool call loop exceeded ${MAX_TOOL_ROUNDTRIPS} roundtrips.`,
+          resultJson: payload,
+        };
+      }
+
+      await ctx.onLog(
+        "stdout",
+        `[paperclip] Ironclaw requested ${functionCalls.length} tool call(s); executing tool bridge round ${round + 1}.\n`,
+      );
+      const toolOutputs = await executeFunctionCalls(ctx, functionCalls);
+      const responseId = asString(payload.id, "").trim();
+      if (!responseId) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "ironclaw_missing_response_id_for_tool_roundtrip",
+          errorMessage: "Ironclaw tool roundtrip response is missing id.",
+          resultJson: payload,
+        };
+      }
+
+      currentBody = {
+        input: toolOutputs,
+        timeout_sec: timeoutSec,
+        stream: false,
+        previous_response_id: responseId,
+        x_context: body.x_context,
       };
+      if (promptInput.instructions) currentBody.instructions = promptInput.instructions;
+      if (configuredMetadata) currentBody.metadata = configuredMetadata;
+      if (requestModel) currentBody.model = requestModel;
+      if (Number.isFinite(temperature) && temperature >= 0 && temperature <= 2) {
+        currentBody.temperature = temperature;
+      }
+      if (numCtx > 0) currentBody.num_ctx = numCtx;
+      if (thinkingMode !== "auto") currentBody.thinking_mode = thinkingMode;
     }
 
     const text = extractOutputText(payload.output) || asString(payload.output_text, "");
