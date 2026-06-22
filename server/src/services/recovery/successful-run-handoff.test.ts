@@ -7,6 +7,7 @@ import {
   buildFinishSuccessfulRunHandoffIdempotencyKey,
   buildSuccessfulRunHandoffExhaustedNotice,
   buildSuccessfulRunHandoffRequiredNotice,
+  buildSuccessfulRunHandoffInstruction,
   decideSuccessfulRunHandoff,
   isIdempotentFinishSuccessfulRunHandoffWakeStatus,
   isSuccessfulRunHandoffRequiredNoticeBody,
@@ -88,9 +89,9 @@ describe("successful run handoff decision", () => {
       allowDocumentUpdates: false,
       resumeRequiresNormalModel: true,
     });
-    expect(decision.instruction).toContain("Resolve the missing disposition before creating or revising any new artifacts");
-    expect(decision.instruction).toContain("Choose **exactly one** outcome");
-    expect(decision.instruction).toContain("record an explicit continuation path");
+    expect(decision.instruction).toContain("Resolve this before creating new artifacts");
+    expect(decision.instruction).toContain("Choose exactly one outcome and execute the matching Paperclip action");
+    expect(decision.instruction).toContain("resumeFromRunId: run-1");
   });
 
   it("does not queue when the issue already has a valid disposition", () => {
@@ -261,6 +262,17 @@ describe("successful run handoff decision", () => {
         ]),
       }),
     ]));
+  });
+
+  it("builds a direct handoff instruction that blocks repeated recovery loops", () => {
+    const instruction = buildSuccessfulRunHandoffInstruction({
+      issueIdentifier: "PAP-1",
+      sourceRunId: "run-123",
+    });
+
+    expect(instruction).toContain("Do not start a new recovery loop");
+    expect(instruction).toContain("resumeFromRunId: run-123");
+    expect(instruction).toContain('"paperclip_completion"');
   });
 
   it("builds the exhausted system notice with recovery metadata", () => {

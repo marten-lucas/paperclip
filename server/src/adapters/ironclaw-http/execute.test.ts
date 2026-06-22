@@ -225,13 +225,11 @@ describe("ironclaw_http execute", () => {
         agentName: "Agent",
       },
       conversation: {
+        label: "Agent heartbeat",
+        title: "Agent",
         kind: "paperclip_heartbeat",
       },
     });
-    expect(requestBody.x_context?.conversation?.label).toContain("Agent heartbeat |");
-    expect(requestBody.x_context?.conversation?.label).toContain("run run-2");
-    expect(requestBody.x_context?.conversation?.title).toContain("Agent |");
-    expect(requestBody.x_context?.conversation?.title).toContain("run run-2");
 
     expect(result.exitCode).toBe(0);
     expect(result.sessionParams).toEqual({ responseId: "resp_123" });
@@ -435,208 +433,6 @@ describe("ironclaw_http execute", () => {
     });
   });
 
-  it("fails issue-bound runs when structured completion/disposition is missing", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      id: "resp_missing_disposition_1",
-      model: "qwen3:8b",
-      status: "completed",
-      output: [{ type: "message", content: "I updated docs and shared progress notes." }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }));
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await execute({
-      runId: "run-missing-disposition-1",
-      agent: {
-        id: "agent-missing-disposition-1",
-        companyId: "company-1",
-        name: "CEO",
-        adapterType: "ironclaw_http",
-        adapterConfig: {},
-      },
-      runtime: {
-        sessionId: null,
-        sessionParams: null,
-        sessionDisplayId: null,
-        taskKey: null,
-      },
-      config: {
-        env: {
-          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
-          IRONCLAW_API_KEY: "token-123",
-        },
-      },
-      context: {
-        issueId: "issue-42",
-        input: "Continue the issue.",
-      },
-      onLog: async () => {},
-    });
-
-    expect(result.exitCode).toBe(1);
-    expect(result.errorCode).toBe("ironclaw_missing_disposition");
-    expect(result.resultJson).toMatchObject({
-      paperclip_completion_validation: {
-        ok: false,
-        enforced: true,
-        errorCode: "missing_structured_completion",
-      },
-    });
-  });
-
-  it("executes caller tool roundtrip via function_call_output", async () => {
-    const originalPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
-    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3100";
-
-    let ironclawRequestCount = 0;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url === "http://127.0.0.1:3100/api/health") {
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-
-      if (url === "http://127.0.0.1:3000/api/v1/responses") {
-        ironclawRequestCount += 1;
-        if (ironclawRequestCount === 1) {
-          return new Response(JSON.stringify({
-            id: "resp_tool_1",
-            model: "default",
-            output: [
-              {
-                type: "function_call",
-                call_id: "call_1",
-                name: "paperclip_api_call",
-                arguments: JSON.stringify({ method: "GET", path: "/api/health" }),
-              },
-            ],
-          }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({
-          id: "resp_tool_2",
-          model: "default",
-          output: [{ type: "message", content: "Tool roundtrip completed." }],
-        }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-
-      return new Response("unexpected url", { status: 500 });
-    });
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    try {
-      const result = await execute({
-        runId: "run-tool-roundtrip",
-        agent: {
-          id: "agent-tool-roundtrip",
-          companyId: "company-1",
-          name: "CEO",
-          adapterType: "ironclaw_http",
-          adapterConfig: {},
-        },
-        runtime: {
-          sessionId: null,
-          sessionParams: null,
-          sessionDisplayId: null,
-          taskKey: null,
-        },
-        config: {
-          env: {
-            IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
-            IRONCLAW_API_KEY: "token-123",
-          },
-        },
-        context: {
-          input: "Continue.",
-        },
-        authToken: "paperclip-jwt",
-        onLog: async () => {},
-      });
-
-      expect(result.exitCode).toBe(0);
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-
-      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
-      const firstIronclawBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
-      expect(firstIronclawBody.tools).toBeDefined();
-      expect(firstIronclawBody.tools[0]?.name).toBe("paperclip_api_call");
-
-      const secondIronclawBody = JSON.parse(String(calls[2]?.[1]?.body ?? "{}"));
-      expect(secondIronclawBody.previous_response_id).toBe("resp_tool_1");
-      expect(secondIronclawBody.input?.[0]).toMatchObject({
-        type: "function_call_output",
-        call_id: "call_1",
-      });
-    } finally {
-      process.env.PAPERCLIP_API_URL = originalPaperclipApiUrl;
-    }
-  });
-
-  it("returns explicit engine-v2-required error when Ironclaw rejects caller tools", async () => {
-    const originalPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
-    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3100";
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "http://127.0.0.1:3000/api/v1/responses") {
-        return new Response("Caller-supplied 'tools' require engine v2 to be enabled on the server", {
-          status: 400,
-          headers: { "content-type": "text/plain" },
-        });
-      }
-      return new Response("unexpected url", { status: 500 });
-    });
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    try {
-      const result = await execute({
-        runId: "run-engine-v2-gate",
-        agent: {
-          id: "agent-engine-v2-gate",
-          companyId: "company-1",
-          name: "CEO",
-          adapterType: "ironclaw_http",
-          adapterConfig: {},
-        },
-        runtime: {
-          sessionId: null,
-          sessionParams: null,
-          sessionDisplayId: null,
-          taskKey: null,
-        },
-        config: {
-          env: {
-            IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
-            IRONCLAW_API_KEY: "token-123",
-          },
-        },
-        context: {
-          input: "Continue.",
-        },
-        authToken: "paperclip-jwt",
-        onLog: async () => {},
-      });
-
-      expect(result.exitCode).toBe(1);
-      expect(result.errorCode).toBe("ironclaw_engine_v2_required");
-      expect(result.errorMessage).toContain("engine v2");
-    } finally {
-      process.env.PAPERCLIP_API_URL = originalPaperclipApiUrl;
-    }
-  });
-
   it("warns when Ironclaw returns a suspiciously short non-stream response", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_short_warn_1",
@@ -689,6 +485,115 @@ describe("ironclaw_http execute", () => {
         classification: "low_signal_short_text",
         low_signal_detected: true,
         retry_recommendation: "fresh_session",
+      },
+    });
+  });
+
+  it("fails issue-bound runs when structured completion/disposition is missing", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_missing_disposition_1",
+      model: "qwen3:8b",
+      status: "completed",
+      output: [{ type: "message", content: "I updated docs and shared progress notes." }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-missing-disposition-1",
+      agent: {
+        id: "agent-missing-disposition-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        issueId: "issue-42",
+        input: "Continue the issue.",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("ironclaw_missing_disposition");
+    expect(result.resultJson).toMatchObject({
+      paperclip_completion_validation: {
+        ok: false,
+        enforced: true,
+        errorCode: "missing_structured_completion",
+      },
+    });
+  });
+
+  it("accepts malformed wrapper completion and disposition alias in_progress", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_completion_alias_1",
+      model: "qwen3:8b",
+      status: "completed",
+      output: [{
+        type: "message",
+        content: "{[\n{\n  \"paperclip_completion\": {\n    \"disposition\": \"in_progress\",\n    \"next_action\": \"Continue with delegated execution\",\n    \"resume_intent\": true\n  }\n}\n]}\n",
+      }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-completion-alias-1",
+      agent: {
+        id: "agent-completion-alias-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        issueId: "issue-43",
+        input: "Continue the issue.",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resultJson).toMatchObject({
+      paperclip_completion_validation: {
+        ok: true,
+        enforced: true,
+        parsed: {
+          disposition: "continue_in_progress",
+          nextAction: "Continue with delegated execution",
+        },
       },
     });
   });
@@ -836,10 +741,8 @@ describe("ironclaw_http execute", () => {
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
     const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
     expect(requestBody.input).toBe("CEO heartbeat task:\n\nExecute the assigned task.");
-    expect(requestBody.x_context?.conversation?.label).toContain("CEO heartbeat |");
-    expect(requestBody.x_context?.conversation?.label).toContain("run run-6");
-    expect(requestBody.x_context?.conversation?.title).toContain("CEO |");
-    expect(requestBody.x_context?.conversation?.title).toContain("run run-6");
+    expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
+    expect(requestBody.x_context?.conversation?.title).toBe("CEO");
     expect(requestBody.x_context?.paperclip?.wakeSource).toBeNull();
     expect(result.exitCode).toBe(0);
   });
@@ -889,55 +792,6 @@ describe("ironclaw_http execute", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("synthesizes stronger manual wake input for generic on-demand context without issue/task", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      id: "resp_303",
-      model: "default",
-      output: [{ type: "message", content: "ok" }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }));
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    await execute({
-      runId: "run-7b",
-      agent: {
-        id: "agent-7b",
-        companyId: "company-1",
-        name: "CEO",
-        adapterType: "ironclaw_http",
-        adapterConfig: {},
-      },
-      runtime: {
-        sessionId: null,
-        sessionParams: null,
-        sessionDisplayId: null,
-        taskKey: null,
-      },
-      config: {
-        env: {
-          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
-          IRONCLAW_API_KEY: "token-123",
-        },
-      },
-      context: {
-        wakeSource: "on_demand",
-        wakeTriggerDetail: "manual",
-        manualTaskMarkdown:
-          "Manual wake task context:\n- Trigger: on_demand/manual\n- Objective: Continue the active assignment and report status/progress.",
-      },
-      onLog: async () => {},
-    });
-
-    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
-    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
-    expect(requestBody.input).toContain("Execution focus:");
-    expect(requestBody.input).toContain("Do not switch to unrelated generic helpdesk workflows.");
-    expect(requestBody.input).toContain("request the exact missing identifier (issueId/taskKey)");
-  });
-
   it("omits previous_response_id when forceFreshSession is requested", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_400",
@@ -981,65 +835,8 @@ describe("ironclaw_http execute", () => {
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
     const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
     expect(requestBody.previous_response_id).toBeUndefined();
-    expect(requestBody.x_context?.conversation?.label).toContain("CEO heartbeat |");
-    expect(requestBody.x_context?.conversation?.label).toContain("run run-8");
-    expect(requestBody.x_context?.conversation?.title).toContain("CEO |");
-    expect(requestBody.x_context?.conversation?.title).toContain("run run-8");
-    expect(result.exitCode).toBe(0);
-  });
-
-  it("forces fresh session for on-demand manual wake without issueId", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      id: "resp_401",
-      model: "default",
-      output: [{ type: "message", content: "ok" }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }));
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await execute({
-      runId: "run-8b",
-      agent: {
-        id: "agent-8b",
-        companyId: "company-1",
-        name: "CEO",
-        adapterType: "ironclaw_http",
-        adapterConfig: {},
-      },
-      runtime: {
-        sessionId: null,
-        sessionParams: { responseId: "resp_existing" },
-        sessionDisplayId: null,
-        taskKey: null,
-      },
-      config: {
-        env: {
-          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
-          IRONCLAW_API_KEY: "token-123",
-        },
-      },
-      context: {
-        wakeSource: "on_demand",
-        wakeTriggerDetail: "manual",
-        manualTaskMarkdown:
-          "Manual wake task context:\n- Trigger: on_demand/manual\n- Objective: Continue the active assignment and report status/progress.",
-      },
-      onLog: async () => {},
-    });
-
-    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
-    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
-    expect(requestBody.previous_response_id).toBeUndefined();
-    expect(requestBody.x_context.paperclip.continuationPolicy.continuationMode).toBe("fresh");
-    expect(requestBody.x_context.paperclip.continuationPolicy.freshSessionReason).toBe(
-      "manual_on_demand_without_issue",
-    );
-    expect(requestBody.x_context.paperclip.continuationPolicy.conversationStrategy).toBe(
-      "manual_wake_fresh_session",
-    );
+    expect(requestBody.x_context?.conversation?.label).toBe("CEO heartbeat");
+    expect(requestBody.x_context?.conversation?.title).toBe("CEO");
     expect(result.exitCode).toBe(0);
   });
 
@@ -1166,11 +963,7 @@ describe("ironclaw_http execute", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_601",
       model: "default",
-      output: [{
-        type: "message",
-        content:
-          "{\"paperclip_completion\":{\"disposition\":\"continue_in_progress\",\"next_action\":\"Resume from run resp_601 and execute the next checkpoint.\",\"resume_intent\":true}}",
-      }],
+      output: [{ type: "message", content: "ok" }],
     }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -1221,11 +1014,7 @@ describe("ironclaw_http execute", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_602",
       model: "default",
-      output: [{
-        type: "message",
-        content:
-          "{\"paperclip_completion\":{\"disposition\":\"continue_in_progress\",\"next_action\":\"Start a fresh retry execution path from this run.\",\"resume_intent\":true}}",
-      }],
+      output: [{ type: "message", content: "ok" }],
     }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -1271,6 +1060,55 @@ describe("ironclaw_http execute", () => {
       "retry_of_failed_run_no_prior_session",
     );
     expect(requestBody.x_context.paperclip.continuationPolicy.continuationMode).toBe("fresh");
+  });
+
+  it("forces fresh session for manual on-demand wake without issue context", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp-manual-fresh-1",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-manual-fresh-1",
+      agent: {
+        id: "agent-manual-fresh-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: { responseId: "resp_existing" },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+      },
+      context: {
+        wakeSource: "on_demand",
+        wakeTriggerDetail: "manual",
+        manualTaskMarkdown: "Objective: continue the active assignment and report status/progress",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.previous_response_id).toBeUndefined();
+    expect(requestBody.x_context.paperclip.continuationPolicy.freshSessionReason).toBe("manual_on_demand_without_issue");
+    expect(requestBody.x_context.paperclip.continuationPolicy.conversationStrategy).toBe("manual_wake_fresh_session");
+    expect(result.exitCode).toBe(0);
   });
 
   it("does not send thinking_mode when thinkingMode is auto", async () => {

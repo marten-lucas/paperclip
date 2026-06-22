@@ -169,8 +169,17 @@ export function buildSuccessfulRunHandoffRequiredNotice(input: {
             keyValueRow("Missing disposition", "clear_next_step"),
             keyValueRow(
               "Valid dispositions",
-              "done, cancelled, in_review with an owner, blocked with blockers, delegated follow-up, or explicit continuation",
+              "done, cancelled, in_review with owner, blocked with blockers, delegated_followup, or continue_in_progress with resumeIntent",
             ),
+            keyValueRow("Escalation rule", "Do not retry the same source-run handoff; record the issue disposition directly."),
+          ],
+        },
+        {
+          title: "Quick template",
+          rows: [
+            keyValueRow("JSON format", '{ "paperclip_completion": { "disposition": "...", "next_action": "..." } }'),
+            keyValueRow("Example", '{ "paperclip_completion": { "disposition": "done", "next_action": "scope complete", "reason": "..." } }'),
+            keyValueRow("How to use", "Choose one valid disposition, write the next concrete action or outcome, and do not open a new recovery loop for the same source run."),
           ],
         },
         {
@@ -219,7 +228,17 @@ export function buildSuccessfulRunHandoffExhaustedNotice(input: {
               : issueLinkRow("Recovery issue", input.recoveryIssue),
             agentLinkRow("Recovery owner", input.recoveryOwner),
             agentLinkRow("Source assignee", input.sourceAssignee),
-            keyValueRow("Suggested action", "choose and record a valid issue disposition without copying transcript content"),
+            keyValueRow("Suggested action", "Choose one valid disposition from template (see recovery issue description) and record without copying transcript"),
+          ],
+        },
+        {
+          title: "Disposition template",
+          rows: [
+            keyValueRow("Option 1", "done | cancelled (scope complete or intentionally stopped)"),
+            keyValueRow("Option 2", "in_review with owner, assignee, approval, or interaction pending"),
+            keyValueRow("Option 3", "blocked with first-class blockers or unblock owner"),
+            keyValueRow("Option 4", "delegated_followup (create follow-up issue) or continue_in_progress with resumeIntent"),
+            keyValueRow("Required field", "next_action: specific action or outcome text"),
           ],
         },
         {
@@ -317,23 +336,34 @@ export function buildSuccessfulRunHandoffInstruction(input: {
 }) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   return [
-    `Your previous run on ${issueLabel} succeeded, but the issue is still in \`in_progress\` and Paperclip cannot identify a valid issue disposition.`,
+    `Your previous run on ${issueLabel} succeeded, but the issue remains \`in_progress\` with no valid disposition. Resolve this before creating new artifacts.`,
     "",
-    "Resolve the missing disposition before creating or revising any new artifacts. Choose **exactly one** outcome and perform the matching Paperclip action:",
+    "**Choose exactly one outcome and execute the matching Paperclip action:**",
     "",
-    "**Is the issue finished?**",
-    "1. Mark it `done` (scope complete) or `cancelled` (intentionally stopped).",
+    "1. **Done/Cancelled?** Mark it \`done\` (scope complete) or \`cancelled\` (intentionally stopped).",
+    "2. **Needs Review?** Move to \`in_review\` with a reviewer path (owner, assignee, approval, or interaction pending).",
+    "3. **Blocked?** Mark \`blocked\` with first-class blockers or unblock owner.",
+    `4. **More Work?** Delegate to follow-up (create/link and block this), or record explicit continuation with \`resumeIntent: true\`, \`resumeFromRunId: ${input.sourceRunId}\`, and next action.`,
+    "5. **Already resolved?** Do not start a new recovery loop; record the valid disposition on the source issue and close out the recovery task.",
     "",
-    "**Does someone else need to look at it?**",
-    "2. Move it to `in_review` with a real reviewer path — `executionState.currentParticipant`, a human owner via `assigneeUserId`, a pending issue-thread interaction, or a linked pending approval.",
+    "**Valid JSON template (choose one):**",
     "",
-    "**Can it not continue right now?**",
-    "3. Mark it `blocked` with first-class blockers (`blockedByIssueIds`) or a clearly named unblock owner/action.",
+    "```json",
+    JSON.stringify({
+      paperclip_completion: {
+        disposition: "done|cancelled|in_review|blocked|delegated_followup|continue_in_progress",
+        next_action: "required: specific action or outcome",
+        reason: "optional: explanation",
+        review_owner: "if in_review",
+        blocked_by: "if blocked: issue IDs or free text",
+        follow_up_issue_id: "if delegated_followup",
+        resumeIntent: true,
+        resumeFromRunId: input.sourceRunId,
+      },
+    }, null, 2),
+    "```",
     "",
-    "**Is there more work to do?**",
-    `4. Either delegate follow-up work (create/link a follow-up issue and block this one on it, or close this issue if its scope is independently complete) or record an explicit continuation path with \`resumeIntent: true\`, \`resumeFromRunId: ${input.sourceRunId}\`, and a concrete next action. Do not perform the remaining source work in this recovery run; the follow-up/resume wake must use the normal model lane.`,
-    "",
-    "Comments, document revisions, work-product writes, and continuation summaries are supporting evidence only — they do not satisfy this handoff unless the issue state/path also records one valid disposition. If this wake is status-only recovery, document or plan updates are not allowed.",
+    "Document updates and comments provide evidence only — they do not satisfy this handoff unless the issue state also records a valid disposition.",
   ].join("\n");
 }
 

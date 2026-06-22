@@ -2237,12 +2237,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   function strandedRecoveryActionFingerprint(input: {
     issue: typeof issues.$inferSelect;
     recoveryCause: StrandedRecoveryCause;
+    sourceRunId?: string | null;
   }) {
+    const isMissingDisposition = input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON;
     return [
       "source_scoped_recovery",
       input.issue.companyId,
       input.issue.id,
       input.recoveryCause,
+      isMissingDisposition ? input.sourceRunId ?? "no-run" : "all-runs",
     ].join(":");
   }
 
@@ -2294,6 +2297,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       fingerprint: strandedRecoveryActionFingerprint({
         issue: input.issue,
         recoveryCause,
+        sourceRunId: recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON ? input.latestRun?.id ?? null : null,
       }),
       evidence: buildStrandedRecoveryActionEvidence({
         issue: input.issue,
@@ -2303,7 +2307,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
       }),
       nextAction: recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
-        ? "Choose and record a valid issue disposition without copying transcript content."
+        ? "Choose and record a valid issue disposition on the source issue, and do not create another missing-disposition recovery for the same run."
         : recoveryCause === "workspace_validation_failed"
           ? "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
         : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.",
