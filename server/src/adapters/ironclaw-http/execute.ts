@@ -277,32 +277,35 @@ async function readSelectedSkillMarkdown(
 }
 
 function buildInstructionLayer(managedInstructions: string | null, enforceStructuredCompletion: boolean): string | null {
-  const executionContract = [
-    "Execution contract:",
-    "- Act on the current heartbeat task and provide a concrete, actionable response.",
-    "- If work is blocked, state the blocker and the exact next action.",
-    "- Avoid one-token acknowledgements; provide useful output.",
-  ].join("\n");
-
-  // Phase A OpenClaw pattern: Always include completion contract, even with managed instructions
-  // This ensures validateIssueCompletionContract can reliably find the schema
+  // MANDATORY completion contract — always appended last, protected from truncation.
+  // The managed instructions are truncated first to leave room for this contract.
   const completionContract = [
+    "---",
+    "MANDATORY: After completing your work, your response MUST end with this exact JSON on the last line.",
+    "Do NOT wrap it in markdown. Do NOT add any text after the JSON.",
     "",
-    "Required completion format (JSON object at response end):",
-    "- disposition: done|cancelled|in_review|blocked|delegated_followup|continue_in_progress",
-    "- next_action: non-empty string describing next step",
-    "- reason: optional explanation",
+    'Example: {"disposition":"done","next_action":"Delegated hiring task to CTO","reason":"Technical role"}',
+    "",
+    "Fields:",
+    "  disposition — one of: done, cancelled, in_review, blocked, delegated_followup, continue_in_progress",
+    "  next_action — required non-empty string: what happens next",
+    "  reason      — optional string: brief explanation",
+    "",
+    "For blocked: also add blocked_by (string, who/what is blocking)",
+    "For delegated_followup: also add follow_up_issue_id (string)",
+    "For in_review: also add review_owner (string)",
+    "For continue_in_progress: also add resume_intent: true",
   ].join("\n");
-  
-  const combinedContract = `${executionContract}${completionContract}`;
 
   if (!managedInstructions) {
-    return truncateChars(combinedContract, MAX_INSTRUCTIONS_CHARS);
+    return truncateChars(completionContract, MAX_INSTRUCTIONS_CHARS);
   }
 
-  // Phase A: Always include completion contract, even with managed instructions
-  // OpenClaw pattern: Consistent contract prevents validation errors
-  return truncateChars(`${managedInstructions}\n\n${combinedContract}`, MAX_INSTRUCTIONS_CHARS);
+  // Truncate managed instructions first to guarantee the contract always fits.
+  const contractBlock = `\n\n${completionContract}`;
+  const budget = MAX_INSTRUCTIONS_CHARS - contractBlock.length;
+  const truncatedManaged = budget > 0 ? truncateChars(managedInstructions, budget) : "";
+  return `${truncatedManaged}${contractBlock}`;
 }
 
 function buildTaskInputLayer(ctx: AdapterExecutionContext): string {

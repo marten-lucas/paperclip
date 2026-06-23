@@ -5,6 +5,12 @@ export function buildIronclawHttpConfig(
 ): Record<string, unknown> {
   const ac: Record<string, unknown> = {};
   if (v.model) ac.model = v.model;
+  if (v.envBindings && typeof v.envBindings === "object" && !Array.isArray(v.envBindings)) {
+    const envEntries = Object.entries(v.envBindings as Record<string, unknown>);
+    if (envEntries.length > 0) {
+      ac.env = Object.fromEntries(envEntries);
+    }
+  }
 
   // Schema-based config values stored under adapterSchemaValues
   const schemaValues = v.adapterSchemaValues ?? {};

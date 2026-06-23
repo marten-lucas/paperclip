@@ -31,4 +31,19 @@ describe("buildIronclawHttpConfig", () => {
     expect(config.numCtx).toBeUndefined();
     expect(config.thinkingMode).toBeUndefined();
   });
+
+  it("preserves env bindings for create payloads", () => {
+    const config = buildIronclawHttpConfig({
+      envBindings: {
+        IRONCLAW_BASE_URL: { type: "plain", value: "https://gateway.example/api/v1/responses" },
+        IRONCLAW_API_KEY: { type: "secret_ref", secretId: "sec_123", version: "latest" },
+      },
+      adapterSchemaValues: {},
+    } as any);
+
+    expect(config.env).toMatchObject({
+      IRONCLAW_BASE_URL: { type: "plain", value: "https://gateway.example/api/v1/responses" },
+      IRONCLAW_API_KEY: { type: "secret_ref", secretId: "sec_123", version: "latest" },
+    });
+  });
 });
