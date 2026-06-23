@@ -57,7 +57,7 @@ export async function testEnvironment(
       code: "ironclaw_url_missing",
       level: "error",
       message: "Missing required configuration: url",
-      hint: "Set adapterConfig.env.IRONCLAW_BASE_URL (secret/plain env binding) to your Ironclaw base URL.",
+      hint: "Set adapterConfig.url (base URL, e.g. http://10.12.12.102:3000/) or adapterConfig.env.IRONCLAW_BASE_URL.",
     });
   } else {
     try {
@@ -90,7 +90,7 @@ export async function testEnvironment(
       code: "ironclaw_auth_missing",
       level: "error",
       message: "Missing required configuration: authToken",
-      hint: "Set adapterConfig.env.IRONCLAW_API_KEY (secret/plain env binding) to a valid Ironclaw bearer token.",
+      hint: "Set adapterConfig.env.IRONCLAW_API_KEY (plain/secret_ref).",
     });
   }
 

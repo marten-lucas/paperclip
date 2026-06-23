@@ -101,10 +101,12 @@ export function IronclawHttpConfigFields({
     if (!trimmed) {
       delete env[key];
       writeEnv(env);
+      if (key === "IRONCLAW_BASE_URL") setSchemaValue("url", undefined);
       return;
     }
     env[key] = { type: "plain", value };
     writeEnv(env);
+    if (key === "IRONCLAW_BASE_URL") setSchemaValue("url", trimmed);
   };
 
   const updateSecretEnv = (key: string, secretId: string) => {
@@ -119,7 +121,7 @@ export function IronclawHttpConfigFields({
   };
 
   const env = readEnv();
-  const gatewayUrl = readPlainEnvBinding(env, "IRONCLAW_BASE_URL");
+  const gatewayUrl = readPlainEnvBinding(env, "IRONCLAW_BASE_URL") || String(getSchemaValue("url", ""));
   const keySecretRef = readSecretRefEnvBinding(env, "IRONCLAW_API_KEY");
   const keyPlain = readPlainEnvBinding(env, "IRONCLAW_API_KEY");
   const keyMode: "plain" | "secret" = keySecretRef ? "secret" : "plain";
@@ -137,15 +139,15 @@ export function IronclawHttpConfigFields({
   return (
     <>
       <Field
-        label="Ironclaw Gateway URL"
-        hint="Base URL des Ironclaw Gateways, z.B. https://ironclaw.example/api/v1/responses"
+        label="Ironclaw Base URL"
+        hint="Basis-URL des Ironclaw-Gateways, z.B. http://10.12.12.102:3000/"
       >
         <DraftInput
           value={gatewayUrl}
           onCommit={(v) => updatePlainEnv("IRONCLAW_BASE_URL", v)}
           immediate
           className={inputClass}
-          placeholder="https://.../api/v1/responses"
+          placeholder="http://10.12.12.102:3000/"
         />
       </Field>
 

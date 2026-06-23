@@ -14,6 +14,9 @@ export function buildIronclawHttpConfig(
 
   // Schema-based config values stored under adapterSchemaValues
   const schemaValues = v.adapterSchemaValues ?? {};
+  if (typeof schemaValues.url === "string" && schemaValues.url.trim().length > 0) {
+    ac.url = schemaValues.url.trim();
+  }
   ac.timeoutSec = (schemaValues.timeoutSec as number) ?? 120;
 
   const temperature = schemaValues.temperature;
