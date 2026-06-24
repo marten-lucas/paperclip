@@ -236,6 +236,113 @@ describe("ironclaw_http execute", () => {
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 20 });
   });
 
+  it("fails when Ironclaw reports an effective model that differs from requested model", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_model_mismatch",
+      model: "mistral-nemo:12b",
+      status: "completed",
+      output: [{ type: "message", content: "hello" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-model-mismatch",
+      agent: {
+        id: "agent-model-mismatch",
+        companyId: "company-1",
+        name: "Agent",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+        model: "qwen3.6:27b",
+      },
+      context: {
+        input: "say hi",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("ironclaw_model_mismatch");
+    expect(result.errorMessage).toContain("executed model 'mistral-nemo:12b'");
+    expect(result.resultJson).toMatchObject({
+      paperclip_model_validation: {
+        ok: false,
+        errorCode: "effective_model_mismatch",
+        requestedModel: "qwen3.6:27b",
+        effectiveModel: "mistral-nemo:12b",
+      },
+    });
+  });
+
+  it("fails when requested model is set but Ironclaw response omits model", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_model_missing",
+      status: "completed",
+      output: [{ type: "message", content: "hello" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-model-missing",
+      agent: {
+        id: "agent-model-missing",
+        companyId: "company-1",
+        name: "Agent",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+        model: "qwen3.6:27b",
+      },
+      context: {
+        input: "say hi",
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("ironclaw_model_mismatch");
+    expect(result.errorMessage).toContain("did not include an effective model");
+    expect(result.resultJson).toMatchObject({
+      paperclip_model_validation: {
+        ok: false,
+        errorCode: "missing_effective_model",
+        requestedModel: "qwen3.6:27b",
+        effectiveModel: null,
+      },
+    });
+  });
+
   it("recovers when IRONCLAW_BASE_URL and IRONCLAW_API_KEY are accidentally swapped", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       id: "resp_swap_1",
@@ -529,6 +636,11 @@ describe("ironclaw_http execute", () => {
       },
       onLog: async () => {},
     });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.input).toContain("FINAL OUTPUT REQUIREMENT:");
+    expect(requestBody.input).toContain("Return exactly one JSON object on the last line.");
 
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("ironclaw_missing_disposition");
@@ -857,6 +969,7 @@ describe("ironclaw_http execute", () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
+
     vi.stubGlobal("fetch", fetchMock);
 
     try {
@@ -918,7 +1031,7 @@ describe("ironclaw_http execute", () => {
       expect(requestBody.input).not.toContain("Skill: paperclip-converting-plans-to-tasks");
       expect(requestBody.input).not.toContain("Use blockedByIssueIds for real blockers.");
       expect(requestBody.instructions).toContain("Always decompose approved plans.");
-      expect(requestBody.instructions).toContain("Execution contract:");
+      expect(requestBody.instructions).toContain("MANDATORY: After completing your work");
       expect(requestBody.metadata).toMatchObject({
         source: "nextcloud-talk",
         channel: "operations",
@@ -957,6 +1070,51 @@ describe("ironclaw_http execute", () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("forwards suppressUserContext when explicitly configured", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "resp_suppress_ctx_1",
+      model: "default",
+      output: [{ type: "message", content: "ok" }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute({
+      runId: "run-suppress-context-1",
+      agent: {
+        id: "agent-suppress-context-1",
+        companyId: "company-1",
+        name: "CEO",
+        adapterType: "ironclaw_http",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        env: {
+          IRONCLAW_BASE_URL: "http://127.0.0.1:3000",
+          IRONCLAW_API_KEY: "token-123",
+        },
+        suppressUserContext: true,
+      },
+      context: {
+        input: "Continue the issue.",
+      },
+      onLog: async () => {},
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit?]>;
+    const requestBody = JSON.parse(String(calls[0]?.[1]?.body ?? "{}"));
+    expect(requestBody.suppress_user_context).toBe(true);
+    expect(result.exitCode).toBe(0);
   });
 
   it("uses task-scoped seed for previous_response_id when issueId is present", async () => {

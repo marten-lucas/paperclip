@@ -312,6 +312,16 @@ function buildTaskInputLayer(ctx: AdapterExecutionContext): string {
   return extractMessage(ctx);
 }
 
+function buildIssueCompletionRecencyReminder(): string {
+  return [
+    "FINAL OUTPUT REQUIREMENT:",
+    "Return exactly one JSON object on the last line.",
+    "Do not use markdown.",
+    "Do not add any text before or after the JSON.",
+    "The JSON must include disposition and next_action.",
+  ].join("\n");
+}
+
 function buildRuntimeSkillContext(skillBundle: {
   selectedKeys: string[];
   summaries: RuntimeSkillSummary[];
@@ -348,7 +358,9 @@ async function buildPromptInput(
   ]);
 
   return {
-    taskInput: buildTaskInputLayer(ctx),
+    taskInput: enforceStructuredCompletion
+      ? `${buildTaskInputLayer(ctx)}\n\n${buildIssueCompletionRecencyReminder()}`
+      : buildTaskInputLayer(ctx),
     hasManagedInstructions: Boolean(instructions.content),
     instructions: buildInstructionLayer(instructions.content, enforceStructuredCompletion),
     runtimeSkillMeta: buildRuntimeSkillContext(skillBundle),
@@ -765,6 +777,44 @@ function toUsage(usage: unknown): AdapterExecutionResult["usage"] | undefined {
   return { inputTokens, outputTokens };
 }
 
+type ModelValidation =
+  | { ok: true }
+  | {
+    ok: false;
+    errorCode: "missing_effective_model" | "effective_model_mismatch";
+    message: string;
+    requestedModel: string;
+    effectiveModel: string | null;
+  };
+
+function validateEffectiveModel(requestedModel: string, payloadModel: unknown): ModelValidation {
+  const requested = requestedModel.trim();
+  if (!requested) return { ok: true };
+
+  const effective = asString(payloadModel, "").trim();
+  if (!effective) {
+    return {
+      ok: false,
+      errorCode: "missing_effective_model",
+      message: `Ironclaw response did not include an effective model while '${requested}' was requested.`,
+      requestedModel: requested,
+      effectiveModel: null,
+    };
+  }
+
+  if (effective !== requested) {
+    return {
+      ok: false,
+      errorCode: "effective_model_mismatch",
+      message: `Ironclaw executed model '${effective}' but '${requested}' was requested.`,
+      requestedModel: requested,
+      effectiveModel: effective,
+    };
+  }
+
+  return { ok: true };
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const config = parseObject(ctx.config);
   const env = parseObject(config.env);
@@ -895,6 +945,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (configuredMetadata) {
     body.metadata = configuredMetadata;
   }
+  if (config.suppressUserContext === true) {
+    body.suppress_user_context = true;
+  }
   // Forward an explicit model when configured. Omitting the field keeps
   // Ironclaw on its server-side default selection.
   if (requestModel) body.model = requestModel;
@@ -984,6 +1037,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timedOut: false,
         errorCode: "ironclaw_response_failed",
         errorMessage: responseErrorMessage || "Ironclaw response status=failed",
+        resultJson: payload,
+      };
+    }
+
+    const modelValidation = validateEffectiveModel(requestModel, payload.model);
+    payload.paperclip_model_validation = modelValidation.ok
+      ? { ok: true }
+      : {
+        ok: false,
+        errorCode: modelValidation.errorCode,
+        requestedModel: modelValidation.requestedModel,
+        effectiveModel: modelValidation.effectiveModel,
+      };
+    if (!modelValidation.ok) {
+      await ctx.onLog(
+        "stderr",
+        `[paperclip] Error: strict model validation failed (${modelValidation.errorCode}). ${modelValidation.message}\n`,
+      );
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "ironclaw_model_mismatch",
+        errorMessage: modelValidation.message,
         resultJson: payload,
       };
     }
